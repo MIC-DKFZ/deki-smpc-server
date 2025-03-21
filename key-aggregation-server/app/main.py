@@ -51,6 +51,7 @@ HASHED_PRESHARED_SECRET = bcrypt.hashpw(sha256_hash, bcrypt.gensalt())
 
 # Delete the preshared secret from memory
 del args.preshared_secret
+del sha256_hash
 
 logging.info(f"Number of clients: {NUM_CLIENTS}")
 logging.info(f"Host: {HOST}")
