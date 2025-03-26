@@ -6,7 +6,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      NUM_CLIENTS: 3
+      NUM_CLIENTS: 6
       HOST: 0.0.0.0
       PORT: 8080
       PRESHARED_SECRET: my_secure_presHared_secret_123!
