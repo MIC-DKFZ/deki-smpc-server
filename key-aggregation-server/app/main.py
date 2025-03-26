@@ -1,56 +1,41 @@
-import argparse
-import json
 import logging
+import os
 import threading
 from hashlib import sha256
 
 import bcrypt
+import redis
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
 from models import KeyClientRegistration
+from starlette.requests import Request
 
 logging.basicConfig(level=logging.INFO)
 
-parser = argparse.ArgumentParser(description="Flower")
-parser.add_argument(
-    "--num-clients",
-    type=int,
-    default=3,
-    help="Number of clients in the federated learning setup",
-)
-parser.add_argument(
-    "--host",
-    type=str,
-    default="0.0.0.0",
-    help="Host IP",
-)
-parser.add_argument(
-    "--port",
-    type=int,
-    default=8080,
-    help="Port number",
-)
-parser.add_argument(
-    "--preshared-secret",
-    "-pss",
-    type=str,
-    default="my_secure_presHared_secret_123!",
-    help="Pre-shared secret for clients to register",
-)
+# Environment variables
+NUM_CLIENTS = int(os.environ.get("NUM_CLIENTS", 3))
+HOST = os.environ.get("HOST", "0.0.0.0")
+PORT = int(os.environ.get("PORT", 8080))
+PRESHARED_SECRET = os.environ.get("PRESHARED_SECRET", "my_secure_presHared_secret_123!")
 
-args = parser.parse_args()
+# Redis connection
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+R = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
 
-NUM_CLIENTS = args.num_clients
-HOST = args.host
-PORT = args.port
+# Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 # First hash the pre-shared secret with SHA-256, then bcrypt the result
-sha256_hash = sha256(args.preshared_secret.encode()).hexdigest().encode()
+sha256_hash = sha256(PRESHARED_SECRET.encode()).hexdigest().encode()
 HASHED_PRESHARED_SECRET = bcrypt.hashpw(sha256_hash, bcrypt.gensalt())
 
+# # State of the server
+# R.sadd("server:states", "waiting", "ready", "aggregating", "finished")
+# R.set("server:current_state", "waiting")
+
 # Delete the preshared secret from memory
-del args.preshared_secret
+del PRESHARED_SECRET
 del sha256_hash
 
 logging.info(f"Number of clients: {NUM_CLIENTS}")
@@ -60,24 +45,67 @@ logging.info(f"Device: {DEVICE}")
 
 app = FastAPI()
 
-# Data storage and lock
-data = {
-    "sum": None,  # Initialized as None; will store tensor data
-    "current_client": 0,
-    "total_clients": NUM_CLIENTS,
-    "clients_logged_in": set(),
-    "number_of_downloads": 0,
-    "final_sum_is_set": False,
-}
-data_lock = threading.Lock()
+# data_lock = threading.Lock()
+
+
+# async def rotate_state():
+#     current_state = R.get("server:current_state")
+#     states = list(R.smembers("server:states"))
+#     current_index = states.index(current_state)
+#     next_index = (current_index + 1) % len(states)
+#     next_state = states[next_index]
+#     R.set("server:current_state", next_state)
+#     logging.info(f"Server state: {next_state}")
+#     return next_state
 
 
 @app.post("/register", response_model=KeyClientRegistration)
-async def register(registration_data: KeyClientRegistration):
+async def register(registration_data: KeyClientRegistration, request: Request):
     if not bcrypt.checkpw(
         registration_data.preshared_secret.encode(), HASHED_PRESHARED_SECRET
     ):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Check if the number of registered clients has reached the expected number
+    registered_clients = R.scard("clients:registered")
+
+    if registered_clients == NUM_CLIENTS:
+        raise HTTPException(
+            status_code=400, detail="All clients have already registered."
+        )
+
+    client_ip = request.client.host
+    client_name = registration_data.client_name
+
+    logging.info(f"Registering client {client_name}")
+    logging.info(f"Client ip address: {client_ip}")
+
+    # Push the registered client to the Redis set
+    res = R.sadd("clients:registered", client_name)
+
+    # if the client is not already registered, add the client info to the Redis hash
+    if res > 0:
+        R.hset(
+            f"clients:info:{client_name}",
+            mapping={
+                "ip_address": client_ip,
+                "client_name": client_name,
+            },
+        )
+        logging.info(f"Client {client_name} registered")
+    else:
+        logging.warning(f"Client {client_name} already registered")
+
+    # Check if the number of registered clients has reached the expected number
+    registered_clients = R.scard("clients:registered")
+
+    if registered_clients == NUM_CLIENTS:
+        logging.info(f"All {registered_clients} clients registered.")
+        logging.info("Starting key aggregation...")
+    else:
+        logging.info(
+            f"Waiting for all ({registered_clients}/{NUM_CLIENTS}) clients to register..."
+        )
 
     return registration_data
 
