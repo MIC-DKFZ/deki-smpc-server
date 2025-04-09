@@ -4,13 +4,16 @@ import logging
 import os
 import secrets
 from hashlib import sha256
+from io import BytesIO
 
 import bcrypt
 import redis
 import torch
-from fastapi import FastAPI, HTTPException
-from models import KeyClientRegistration
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse, Response, JSONResponse
+from models import KeyClientRegistration, CheckForTaskRequest
 from starlette.requests import Request
+from utils import ActiveTasks, ActiveTasksPhase2
 
 logging.basicConfig(level=logging.INFO)
 
@@ -19,6 +22,7 @@ NUM_CLIENTS = int(os.environ.get("NUM_CLIENTS", 3))
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", 8080))
 PRESHARED_SECRET = os.environ.get("PRESHARED_SECRET", "my_secure_presHared_secret_123!")
+WEIGHT_TTL = int(os.environ.get("WEIGHT_TTL", 600))  # seconds
 
 # Redis connection
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
@@ -36,12 +40,19 @@ HASHED_PRESHARED_SECRET = bcrypt.hashpw(sha256_hash, bcrypt.gensalt())
 del PRESHARED_SECRET
 del sha256_hash
 
+assert NUM_CLIENTS >= 3, "NUM_CLIENTS must be greater than 3"
+
 logging.info(f"Number of clients: {NUM_CLIENTS}")
 logging.info(f"Host: {HOST}")
 logging.info(f"Port: {PORT}")
 logging.info(f"Device: {DEVICE}")
 
 app = FastAPI()
+tasks_phase_1 = ActiveTasks()
+tasks_phase_2 = ActiveTasksPhase2()
+
+# Store Phase in Redis
+R.set("phase", 1)
 
 
 async def __secure_shuffle(array: list) -> list:
@@ -119,39 +130,141 @@ async def define_aggregation_flow():
                 next_level.append(current_level[i])
         current_level = next_level
 
-
-async def process_aggregation_tasks():
-    # --- Phase 1: Intra-group ring aggregation ---
+    # Pull the initial active tasks from the Redis queues
     group_keys = [key for key in R.keys("queue:aggregation:initial:group_*")]
-    group_keys.sort()  # Optional: for consistent ordering
 
     for group_queue in group_keys:
-        logging.info(f"Processing {group_queue}")
-        while True:
-            task_data = R.lpop(group_queue)
-            if not task_data:
-                break  # No more tasks in this group
+        task_data = R.lpop(group_queue)
+        if task_data:
             task = json.loads(task_data)
-            await handle_task(task, phase="initial", queue=group_queue)
+            tasks_phase_1.add_task(task["from"], task["to"], group_queue)
 
-    # --- Phase 2: Inter-group aggregation ---
-    logging.info("Processing queue:aggregation:groups")
-    while True:
-        task_data = R.lpop("queue:aggregation:groups")
-        if not task_data:
-            break
+    # Load the tasks for phase 2
+    task_data = {}
+    for key in sorted(R.keys("queue:aggregation:groups")):
+        task_data[key] = R.lrange(key, 0, -1)
+    tasks_phase_2.load_tasks_from_json(
+        task_data=task_data, queue_name="queue:aggregation:groups"
+    )
+
+
+async def schedule_next_task(queue):
+    task_data = R.lpop(queue)
+    if task_data:
         task = json.loads(task_data)
-        await handle_task(task, phase="group", queue="queue:aggregation:groups")
+        tasks_phase_1.add_task(task["from"], task["to"], queue)
+    else:
+        # Delete the queue if it's empty
+        R.delete(queue)
 
-    logging.info("All aggregation tasks completed.")
+
+@app.get("/tasks/participants")
+async def get_phase_participants():
+    return JSONResponse(
+        content={
+            "phase_1_clients": list(R.smembers("clients:registered")),
+            "phase_2_clients": list(tasks_phase_2.phase_2_clients),
+        }
+    )
 
 
-async def handle_task(task, phase, queue):
-    sender = task["from"]
-    receiver = task["to"]
-    logging.info(f"[{phase.upper()}] {sender} → {receiver} (from {queue})")
-    # Simulate actual work
-    await asyncio.sleep(0.1)
+@app.get("/aggregation/phase/{phase_id}/check_for_task")
+async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: int):
+    assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
+
+    if phase_id == 1:
+
+        task = tasks_phase_1.check_for_task(check_for_task_request.client_name)
+
+        if task:
+            return task
+        else:
+            return Response(status_code=204)
+    else:
+        task = tasks_phase_2.check_for_task(check_for_task_request.client_name)
+
+        if task:
+            return task
+        else:
+            return Response(status_code=204)
+
+
+@app.post("/aggregation/phase/{phase_id}/upload")
+async def upload_weights(check_for_task_request: CheckForTaskRequest, phase_id: int):
+    assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
+
+    if phase_id == 1:
+        tasks_phase_1.complete_task(check_for_task_request.client_name)
+        return {"message": f"Weights uploaded for {check_for_task_request.client_name}"}
+    else:
+        tasks_phase_2.complete_task(check_for_task_request.client_name)
+        return {"message": f"Weights uploaded for {check_for_task_request.client_name}"}
+
+
+@app.get("/aggregation/phase/{phase_id}/download")
+async def download_weights(check_for_task_request: CheckForTaskRequest, phase_id: int):
+    assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
+
+    if phase_id == 1:
+        task = tasks_phase_1.complete_task(check_for_task_request.client_name)
+        asyncio.create_task(schedule_next_task(task["queue"]))
+        # Just a placeholder for now
+        return {
+            "message": f"Weights downloaded for {check_for_task_request.client_name}"
+        }
+    else:
+        task = tasks_phase_2.complete_task(check_for_task_request.client_name)
+        # Just a placeholder for now
+        return {
+            "message": f"Weights downloaded for {check_for_task_request.client_name}"
+        }
+
+
+@app.get("/tasks")
+async def debug_tasks():
+    data = {}
+    for key in sorted(R.keys("queue:aggregation:*")):
+        data[key] = R.lrange(key, 0, -1)
+    return data
+
+
+@app.post("/tasks/reset")
+async def reset_tasks():
+    # Clear all tasks and queues
+    R.delete("queue:aggregation:initial")
+    R.delete("queue:aggregation:groups")
+    tasks_phase_1.clear_tasks()
+    tasks_phase_2.clear_tasks()
+
+    asyncio.create_task(define_aggregation_flow())
+
+    return {"message": "All tasks and queues have been reset."}
+
+
+@app.get("/aggregation/phase/{phase_id}/active_tasks")
+async def get_active_tasks(phase_id: int):
+    assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
+    if phase_id == 1:
+        active_tasks = tasks_phase_1.get_all_tasks()
+    else:
+        active_tasks = tasks_phase_2.get_all_tasks()
+    return active_tasks
+
+
+@app.get("/redis/queues")
+async def get_redis_queues():
+    queues = {}
+    for key in sorted(R.keys("queue:aggregation:*")):
+        queues[key] = R.lrange(key, 0, -1)
+    return queues
+
+
+@app.get("/redis/queues/{queue_name}")
+async def get_redis_queue(queue_name: str):
+    queue = R.lrange(f"queue:aggregation:{queue_name}", 0, -1)
+    if not queue:
+        raise HTTPException(status_code=404, detail="Queue not found")
+    return {queue_name: queue}
 
 
 @app.post("/register", response_model=KeyClientRegistration)
@@ -164,13 +277,17 @@ async def register(registration_data: KeyClientRegistration, request: Request):
     # Check if the number of registered clients has reached the expected number
     registered_clients = R.scard("clients:registered")
 
+    client_ip = request.client.host
+    client_name = registration_data.client_name
+
+    # Check if the client is already registered
+    if R.sismember("clients:registered", client_name):
+        return registration_data
+
     if registered_clients == NUM_CLIENTS:
         raise HTTPException(
             status_code=400, detail="All clients have already registered."
         )
-
-    client_ip = request.client.host
-    client_name = registration_data.client_name
 
     logging.info(f"Registering client {client_name}")
     logging.info(f"Client ip address: {client_ip}")
@@ -197,8 +314,7 @@ async def register(registration_data: KeyClientRegistration, request: Request):
     if registered_clients == NUM_CLIENTS:
         logging.info(f"All {registered_clients} clients registered.")
         logging.info("Starting key aggregation...")
-        await define_aggregation_flow()
-        await process_aggregation_tasks()
+        asyncio.create_task(define_aggregation_flow())
     else:
         logging.info(
             f"Waiting for all ({registered_clients}/{NUM_CLIENTS}) clients to register..."
