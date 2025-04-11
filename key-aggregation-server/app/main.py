@@ -1,4 +1,6 @@
 import asyncio
+import gzip
+import io
 import json
 import logging
 import os
@@ -9,9 +11,9 @@ from io import BytesIO
 import bcrypt
 import redis
 import torch
-from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse, Response, JSONResponse
-from models import KeyClientRegistration, CheckForTaskRequest
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
+from models import CheckForTaskRequest, KeyClientRegistration
 from starlette.requests import Request
 from utils import ActiveTasks, ActiveTasksPhase2
 
@@ -28,6 +30,10 @@ WEIGHT_TTL = int(os.environ.get("WEIGHT_TTL", 600))  # seconds
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 R = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+R_BINARY = redis.Redis(
+    host=REDIS_HOST, port=REDIS_PORT, db=0
+)  # decode_responses=False is default
+
 
 # Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -190,34 +196,99 @@ async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: 
 
 
 @app.post("/aggregation/phase/{phase_id}/upload")
-async def upload_weights(check_for_task_request: CheckForTaskRequest, phase_id: int):
+async def upload_weights(
+    phase_id: int, key: UploadFile = File(...), client_name: str = Form(...)
+):
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
 
+    # # --- Load and print torch model ---
+    # contents = await key.read()
+    # buffer = io.BytesIO(contents)
+
+    # with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
+    #     state_dict: dict = torch.load(f, map_location="cpu")  # map_location if needed
+
+    # print(f"Loaded state_dict from {client_name}:")
+    # for k, v in state_dict.items():
+    #     print(f"{k}: {v.shape}")
+
+    contents = await key.read()
+    # buffer = io.BytesIO(contents)
+
+    # with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
+    #     state_dict: dict = torch.load(f, map_location="cpu")  # map_location if needed
+
+    # --- Store in Redis ---
+
     if phase_id == 1:
-        tasks_phase_1.complete_task(check_for_task_request.client_name)
-        return {"message": f"Weights uploaded for {check_for_task_request.client_name}"}
+        task = tasks_phase_1.check_for_task(client_name)["task"]
+        sender = task["from"]
+        receiver = task["to"]
+        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        R_BINARY.set(redis_key, contents)
+        tasks_phase_1.complete_task(client_name)
     else:
-        tasks_phase_2.complete_task(check_for_task_request.client_name)
-        return {"message": f"Weights uploaded for {check_for_task_request.client_name}"}
+        task = tasks_phase_2.check_for_task(client_name)["task"]
+        sender = task["from"]
+        receiver = task["to"]
+        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        R_BINARY.set(redis_key, contents)
+        tasks_phase_2.complete_task(client_name)
+    return {"message": f"Weights uploaded for {client_name}"}
 
 
 @app.get("/aggregation/phase/{phase_id}/download")
 async def download_weights(check_for_task_request: CheckForTaskRequest, phase_id: int):
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
 
+    # redis_key = f"phase:{phase_id}:weights:{check_for_task_request.client_name}"
+    # contents = R.get(redis_key)
+
+    # if contents is None:
+    #     raise HTTPException(
+    #         status_code=404,
+    #         detail=f"Weights not found for client {check_for_task_request.client_name}",
+    #     )
+
     if phase_id == 1:
-        task = tasks_phase_1.complete_task(check_for_task_request.client_name)
-        asyncio.create_task(schedule_next_task(task["queue"]))
-        # Just a placeholder for now
-        return {
-            "message": f"Weights downloaded for {check_for_task_request.client_name}"
-        }
+        task = tasks_phase_1.check_for_task(check_for_task_request.client_name)["task"]
+        sender = task["from"]
+        receiver = task["to"]
+        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        contents = R_BINARY.get(redis_key)
+        if contents is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Weights not found for client {check_for_task_request.client_name}",
+            )
+
+        task_queue = tasks_phase_1.complete_task(check_for_task_request.client_name)
+        asyncio.create_task(schedule_next_task(task_queue["queue"]))
     else:
-        task = tasks_phase_2.complete_task(check_for_task_request.client_name)
-        # Just a placeholder for now
-        return {
-            "message": f"Weights downloaded for {check_for_task_request.client_name}"
-        }
+        task = tasks_phase_2.check_for_task(check_for_task_request.client_name)["task"]
+        sender = task["from"]
+        receiver = task["to"]
+        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        contents = R_BINARY.get(redis_key)
+        if contents is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Weights not found for client {check_for_task_request.client_name}",
+            )
+        tasks_phase_2.complete_task(check_for_task_request.client_name)
+
+    # Create a stream to return the file
+    filename = f"{check_for_task_request.client_name}_weights.pt.gz"
+    return StreamingResponse(
+        io.BytesIO(contents),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/redis/keys")
+async def get_redis_keys():
+    return R.keys("phase:*")
 
 
 @app.get("/tasks")
