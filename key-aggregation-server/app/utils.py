@@ -226,3 +226,10 @@ class ActiveTasksPhase2(Task):
             self.phase_2_clients.add(to)
 
             self.add_task(frm, to, queue_name, depends_on=depends_on)
+
+        # Memorize the last recipient
+        if edges:
+            self.last_recipient = edges[-1][1]
+
+    def get_last_recipient(self) -> str | None:
+        return self.last_recipient

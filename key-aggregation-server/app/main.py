@@ -307,6 +307,18 @@ async def reset_tasks():
     tasks_phase_1.clear_tasks()
     tasks_phase_2.clear_tasks()
 
+    # Delete all registered clients
+    R.delete("clients:registered")
+
+    # Reset the phase in Redis
+    R.set("phase", 1)
+
+    # Clear the model weights
+    for key in sorted(R.keys("phase:*:weights:*")):
+        R.delete(key)
+    # Clear the final sum
+    R.delete("final:sum")
+
     asyncio.create_task(define_aggregation_flow())
 
     return {"message": "All tasks and queues have been reset."}
@@ -392,6 +404,49 @@ async def register(registration_data: KeyClientRegistration, request: Request):
         )
 
     return registration_data
+
+
+@app.post("/aggregation/final/upload")
+async def upload_final_sum(
+    final_sum: UploadFile = File(...), client_name: str = Form(...)
+):
+    """
+    Endpoint to upload the final accumulated sum.
+    """
+    contents = await final_sum.read()
+    redis_key = f"final:sum"
+    R_BINARY.set(redis_key, contents)
+    return {"message": f"Final sum uploaded by {client_name}"}
+
+
+@app.get("/aggregation/final/download")
+async def retrieve_final_sum():
+    """
+    Endpoint to retrieve the final accumulated sum shared by all clients.
+    """
+    content = R_BINARY.get(f"final:sum")
+
+    if content is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Final sum not found. Please ensure it has been uploaded.",
+        )
+
+    filename = f"final_weights.pt.gz"
+    return StreamingResponse(
+        io.BytesIO(content),
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.get("/aggregation/final/recipient")
+async def get_final_sum_recipient():
+    """
+    Endpoint to retrieve the recipient of the final sum.
+    """
+    recipient = tasks_phase_2.get_last_recipient()
+    return {"recipient": recipient}
 
 
 if __name__ == "__main__":
