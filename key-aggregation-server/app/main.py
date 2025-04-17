@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import secrets
+import time
 from hashlib import sha256
 from io import BytesIO
 
@@ -199,26 +200,11 @@ async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: 
 async def upload_weights(
     phase_id: int, key: UploadFile = File(...), client_name: str = Form(...)
 ):
-    assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
-
-    # # --- Load and print torch model ---
-    # contents = await key.read()
-    # buffer = io.BytesIO(contents)
-
-    # with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
-    #     state_dict: dict = torch.load(f, map_location="cpu")  # map_location if needed
-
-    # print(f"Loaded state_dict from {client_name}:")
-    # for k, v in state_dict.items():
-    #     print(f"{k}: {v.shape}")
-
+    """
+    Endpoint to upload weights for a specific phase.
+    """
+    start_time = time.time()
     contents = await key.read()
-    # buffer = io.BytesIO(contents)
-
-    # with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
-    #     state_dict: dict = torch.load(f, map_location="cpu")  # map_location if needed
-
-    # --- Store in Redis ---
 
     if phase_id == 1:
         task = tasks_phase_1.check_for_task(client_name)["task"]
@@ -234,21 +220,20 @@ async def upload_weights(
         redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
         R_BINARY.set(redis_key, contents)
         tasks_phase_2.complete_task(client_name)
-    return {"message": f"Weights uploaded for {client_name}"}
+
+    duration = time.time() - start_time
+    logging.info(
+        f"Upload weights for phase {phase_id} by {client_name} took {duration:.2f} seconds."
+    )
+    return {"message": f"Weights uploaded for {client_name}", "duration": duration}
 
 
 @app.get("/aggregation/phase/{phase_id}/download")
 async def download_weights(check_for_task_request: CheckForTaskRequest, phase_id: int):
-    assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
-
-    # redis_key = f"phase:{phase_id}:weights:{check_for_task_request.client_name}"
-    # contents = R.get(redis_key)
-
-    # if contents is None:
-    #     raise HTTPException(
-    #         status_code=404,
-    #         detail=f"Weights not found for client {check_for_task_request.client_name}",
-    #     )
+    """
+    Endpoint to download weights for a specific phase.
+    """
+    start_time = time.time()
 
     if phase_id == 1:
         task = tasks_phase_1.check_for_task(check_for_task_request.client_name)["task"]
@@ -277,7 +262,11 @@ async def download_weights(check_for_task_request: CheckForTaskRequest, phase_id
             )
         tasks_phase_2.complete_task(check_for_task_request.client_name)
 
-    # Create a stream to return the file
+    duration = time.time() - start_time
+    logging.info(
+        f"Download weights for phase {phase_id} by {check_for_task_request.client_name} took {duration:.2f} seconds."
+    )
+
     filename = f"{check_for_task_request.client_name}_weights.pt.gz"
     return StreamingResponse(
         io.BytesIO(contents),
@@ -413,10 +402,13 @@ async def upload_final_sum(
     """
     Endpoint to upload the final accumulated sum.
     """
+    start_time = time.time()
     contents = await final_sum.read()
     redis_key = f"final:sum"
     R_BINARY.set(redis_key, contents)
-    return {"message": f"Final sum uploaded by {client_name}"}
+    duration = time.time() - start_time
+    logging.info(f"Upload final sum by {client_name} took {duration:.2f} seconds.")
+    return {"message": f"Final sum uploaded by {client_name}", "duration": duration}
 
 
 @app.get("/aggregation/final/download")
@@ -424,6 +416,7 @@ async def retrieve_final_sum():
     """
     Endpoint to retrieve the final accumulated sum shared by all clients.
     """
+    start_time = time.time()
     content = R_BINARY.get(f"final:sum")
 
     if content is None:
@@ -433,6 +426,8 @@ async def retrieve_final_sum():
         )
 
     filename = f"final_weights.pt.gz"
+    duration = time.time() - start_time
+    logging.info(f"Download final sum took {duration:.2f} seconds.")
     return StreamingResponse(
         io.BytesIO(content),
         media_type="application/octet-stream",
