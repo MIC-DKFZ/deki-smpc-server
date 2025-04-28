@@ -1,4 +1,8 @@
-version: '3.8'
+
+x-defaults: &default-settings
+  HOST: 0.0.0.0
+  NUM_CLIENTS: 10
+  EPOCHS: 1
 
 services:
   key-aggregation-server:
@@ -6,8 +10,7 @@ services:
     ports:
       - "8080:8080"
     environment:
-      NUM_CLIENTS: 10
-      HOST: 0.0.0.0
+      <<: *default-settings
       PORT: 8080
       PRESHARED_SECRET: my_secure_presHared_secret_123!
       REDIS_HOST: redis
@@ -19,6 +22,20 @@ services:
           - driver: nvidia
             count: 1
             capabilities: [gpu]
+  # fl-server:
+  #   build: ./fl-server
+  #   ports:
+  #     - "8081:8081"
+  #   environment:
+  #     <<: *default-settings
+  #     PORT: 8081
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #         - driver: nvidia
+  #           count: 1
+  #           capabilities: [gpu]
   redis:
     image: redis:latest
     ports:
