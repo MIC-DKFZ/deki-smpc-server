@@ -107,6 +107,7 @@ async def define_aggregation_flow():
     initial_groups = await __form_initial_groups(registered_clients)
 
     group_representatives = []
+    first_senders = []  # List to store first senders
 
     # Phase 1: Intra-group ring aggregation (per-group queues)
     for group_id, clients in initial_groups.items():
@@ -122,6 +123,14 @@ async def define_aggregation_flow():
 
         # First client is the representative for group aggregation
         group_representatives.append(clients[0])
+        first_senders.append(clients[0])  # Add the first sender to the list
+
+    logging.info(f"Registered clients: {registered_clients}")
+    logging.info(f"Initial groups: {initial_groups}")
+    logging.info(f"First senders before saving to Redis: {first_senders}")
+
+    # Save the list of first senders in Redis
+    R.set("phase:1:first_senders", json.dumps(first_senders))
 
     # Phase 2: Inter-group aggregation (binary tree style)
     current_level = group_representatives
@@ -308,6 +317,9 @@ async def reset_tasks():
     # Clear the final sum
     R.delete("final:sum")
 
+    # Clear the first senders
+    R.delete("phase:1:first_senders")
+
     asyncio.create_task(define_aggregation_flow())
 
     return {"message": "All tasks and queues have been reset."}
@@ -443,6 +455,14 @@ async def get_final_sum_recipient():
     recipient = tasks_phase_2.get_last_recipient()
     return {"recipient": recipient}
 
+
+@app.get("/aggregation/phase/1/first_senders")
+async def is_client_first_sender():
+    """
+    Endpoint to check if a client is in the list of first senders.
+    """
+    first_senders = json.loads(R.get("phase:1:first_senders") or "[]")
+    return {"first_senders": first_senders}
 
 if __name__ == "__main__":
     import uvicorn
