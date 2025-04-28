@@ -1,6 +1,6 @@
 # deki-smpc-server
 
-**deki-smpc-server** is the server-side component of the [deki-smpc](https://github.com/your-org/deki-smpc) ecosystem, enabling **Secure Multi-Party Computation (SMPC)** for federated learning.  
+**deki-smpc-server** is the server-side component of the [deki-smpc](https://github.com/MIC-DKFZ/deki-smpc) ecosystem, enabling **Secure Multi-Party Computation (SMPC)** for federated learning.  
 It includes the **Key Aggregation Server** and the **FL Aggregation Server**, all deployable effortlessly with **Docker Compose**.
 
 ## 🛠️ Components
