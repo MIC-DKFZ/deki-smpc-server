@@ -14,4 +14,5 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 COPY ./app /code/app
 
 # 
+ENV PYTHONPATH=/code
 ENTRYPOINT ["python", "app/main.py"]

@@ -1,3 +1,0 @@
-flwr
-flwr-datasets[vision]
-tqdm==4.65.0

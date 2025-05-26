@@ -22,20 +22,6 @@ services:
           - driver: nvidia
             count: 1
             capabilities: [gpu]
-  # fl-server:
-  #   build: ./fl-server
-  #   ports:
-  #     - "8081:8081"
-  #   environment:
-  #     <<: *default-settings
-  #     PORT: 8081
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #         - driver: nvidia
-  #           count: 1
-  #           capabilities: [gpu]
   redis:
     image: redis:latest
     ports:
