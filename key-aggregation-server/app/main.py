@@ -13,7 +13,6 @@ import redis
 import torch
 import uvicorn
 from app.config import HOST, PORT
-
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from models import CheckForTaskRequest, KeyClientRegistration
@@ -21,8 +20,7 @@ from starlette.requests import Request
 from utils import ActiveTasks, ActiveTasksPhase2
 
 from key_aggregation.routes import router as key_aggregation_router
-
-# from .secure_fl.routes import router as secure_fl_router
+from secure_fl.routes import router as secure_fl_router
 
 logging.basicConfig(level=logging.INFO)
 
@@ -36,10 +34,6 @@ if __name__ == "__main__":
         {
             "name": "Client Registration",
             "description": "Register clients for key aggregation",
-        },
-        {
-            "name": "Task Management",
-            "description": "Manage active tasks and their phases",
         },
         {
             "name": "Health Check",
@@ -63,8 +57,8 @@ if __name__ == "__main__":
     app.include_router(
         key_aggregation_router, prefix="/key-aggregation", tags=["Key Aggregation"]
     )
-    # app.include_router(
-    #     secure_fl_router, prefix="/secure-fl", tags=["Federated Learning"]
-    # )
+    app.include_router(
+        secure_fl_router, prefix="/secure-fl", tags=["Federated Learning"]
+    )
 
     uvicorn.run(app, host=HOST, port=PORT)
