@@ -12,7 +12,7 @@ from io import BytesIO
 import bcrypt
 import redis
 import torch
-from app.config import NUM_CLIENTS, R_BINARY
+from app.config import NUM_CLIENTS, R_BINARY, DEVICE
 from fastapi import (
     APIRouter,
     Depends,
@@ -51,7 +51,8 @@ async def upload_model(model: UploadFile = File(...), client_name: str = Form(..
 
 async def aggregate_models_if_ready():
     """
-    Dummy aggregation: if all NUM_CLIENTS models are uploaded, set the first as final.
+    Aggregate all uploaded models: sum their tensors, store as 'model:final', and delete all model keys from Redis.
+    Handles lz4, gzip, and non-compressed model files robustly.
     """
     try:
         # List all model:* keys except 'model:final'
@@ -59,12 +60,43 @@ async def aggregate_models_if_ready():
         if len(keys) == NUM_CLIENTS:
             # Only aggregate if 'model:final' does not exist
             if not R_BINARY.exists("model:final"):
-                # Use the first uploaded model as the final one
-                first_key = keys[0]
-                model_bytes = R_BINARY.get(first_key)
-                R_BINARY.set("model:final", model_bytes)
+                import lz4.frame
+
+                models = []
+                for key in keys:
+                    model_bytes = R_BINARY.get(key)
+                    buffer = BytesIO(model_bytes)
+                    magic = buffer.read(4)
+                    buffer.seek(0)
+                    try:
+                        if magic[:2] == b"\x1f\x8b":  # gzip
+                            with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
+                                model_data = torch.load(f, map_location=DEVICE)
+                        elif magic == b"\x04\x22\x4d\x18":  # lz4
+                            with lz4.frame.open(buffer, mode="rb") as f:
+                                model_data = torch.load(f, map_location=DEVICE)
+                        else:  # raw torch
+                            model_data = torch.load(buffer, map_location=DEVICE)
+                    except Exception as e:
+                        logging.error(f"Error loading model from key {key}: {e}")
+                        raise
+                    models.append(model_data)
+                # Sum all models
+                agg_model = models[0]
+                for m in models[1:]:
+                    for k in agg_model.keys():
+                        agg_model[k] += m[k]
+                # Save aggregated model to bytes (lz4)
+                out_buffer = BytesIO()
+                with lz4.frame.open(out_buffer, mode="wb") as f:
+                    torch.save(agg_model, f)
+                out_buffer.seek(0)
+                R_BINARY.set("model:final", out_buffer.read())
+                # Delete all model:* keys except 'model:final'
+                for key in keys:
+                    R_BINARY.delete(key)
                 logging.info(
-                    f"Aggregated {NUM_CLIENTS} models. Set {first_key} as final."
+                    f"Aggregated {NUM_CLIENTS} models. Summed and set as final (lz4). Deleted all model keys."
                 )
     except Exception as e:
         logging.error(f"Error in aggregate_models_if_ready: {e}")

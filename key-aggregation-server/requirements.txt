@@ -4,3 +4,4 @@ uvicorn[standard]
 bcrypt
 redis
 python-multipart
+lz4
