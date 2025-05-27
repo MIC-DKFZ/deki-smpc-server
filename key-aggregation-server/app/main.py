@@ -1,24 +1,8 @@
-import gzip
-import io
-import json
 import logging
-import os
-import secrets
-import time
-from hashlib import sha256
-from io import BytesIO
 
-import bcrypt
-import redis
-import torch
 import uvicorn
 from app.config import HOST, PORT
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from models import CheckForTaskRequest, KeyClientRegistration
-from starlette.requests import Request
-from utils import ActiveTasks, ActiveTasksPhase2
-
+from fastapi import FastAPI
 from key_aggregation.routes import router as key_aggregation_router
 from secure_fl.routes import router as secure_fl_router
 

@@ -1,30 +1,13 @@
 import asyncio
-import gzip
 import io
 import json
 import logging
-import os
 import secrets
 import time
-from hashlib import sha256
-from io import BytesIO
 
 import bcrypt
-import redis
-import torch
 from app.config import HASHED_PRESHARED_SECRET, NUM_CLIENTS, R_BINARY, R
-from fastapi import (
-    APIRouter,
-    Depends,
-    FastAPI,
-    File,
-    Form,
-    HTTPException,
-    Request,
-    Response,
-    UploadFile,
-    status,
-)
+from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from models import CheckForTaskRequest, KeyClientRegistration
 from starlette.requests import Request
