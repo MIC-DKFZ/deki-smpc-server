@@ -44,8 +44,8 @@ The following environment variables are used (with their default values):
 | `HOST`              | Host IP to bind to                        | `0.0.0.0`                             |
 | `NUM_CLIENTS`       | Number of expected clients                | `10`                                  |
 | `EPOCHS`            | Number of training epochs                 | `1`                                   |
-| `PORT`              | Port to serve on                          | `8080` (Key Server) / `8081` (FL Server) |
-| `PRESHARED_SECRET`  | Secret key used for secure communication  | `my_secure_presHared_secret_123!`      |
+| `PORT`              | Port to serve on                          | `8080`                                |
+| `PRESHARED_SECRET`  | Secret key used for secure communication  | `my_secure_presHared_secret_123!`     |
 | `REDIS_HOST`        | Redis host                                | `redis`                               |
 | `REDIS_PORT`        | Redis port                                | `6379`                                |
 
