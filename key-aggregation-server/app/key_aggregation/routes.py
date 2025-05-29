@@ -65,7 +65,9 @@ async def define_aggregation_flow():
     registered_clients = await __secure_shuffle(registered_clients)
 
     # Form groups
-    initial_groups = await __form_initial_groups(registered_clients)
+    tasks_phase_2.phase_1_groups = initial_groups = await __form_initial_groups(
+        registered_clients
+    )
 
     group_representatives = []
     first_senders = []  # List to store first senders

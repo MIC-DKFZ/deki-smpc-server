@@ -108,6 +108,7 @@ class ActiveTasksPhase2(Task):
         self.dependency_map = {}  # Maps (from -> to) to their parent
         self.lock = Lock()
         self.phase_2_clients = set()  # Clients that are in phase 2
+        self.phase_1_groups = {}  # Groups that are in phase 1
 
     def add_task(
         self, sender: str, receiver: str, queue: str, depends_on: tuple | None = None
@@ -230,6 +231,8 @@ class ActiveTasksPhase2(Task):
         # Memorize the last recipient
         if edges:
             self.last_recipient = edges[-1][1]
+        else:
+            self.last_recipient = self.phase_1_groups[0][0]
 
     def get_last_recipient(self) -> str | None:
         return self.last_recipient

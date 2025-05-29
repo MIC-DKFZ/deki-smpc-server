@@ -1,7 +1,7 @@
 
 x-defaults: &default-settings
   HOST: 0.0.0.0
-  NUM_CLIENTS: 10
+  NUM_CLIENTS: 4
   EPOCHS: 1
 
 services:
@@ -26,5 +26,3 @@ services:
     image: redis:latest
     ports:
       - "6379:6379"
-    # volumes:
-    #   - ./redis_data:/data
