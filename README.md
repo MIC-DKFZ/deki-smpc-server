@@ -8,7 +8,7 @@ It includes the **Key Aggregation Server** and the **FL Aggregation Server**, al
 - **Key Aggregation Server**  
   REST API (FastAPI) for efficient, concurrent multi-party key generation and secure key exchange.
 - **FL Aggregation Server**  
-  Secure federated model aggregation based on Flower and PyTorch.
+  Secure federated model aggregation based on FastAPI and PyTorch. (Used to be Flower)
 - **Redis**  
   In-memory store for temporary key material and synchronization between parties.
 
