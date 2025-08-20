@@ -147,6 +147,18 @@ async def get_phase_participants():
     )
 
 
+@router.get("/registered-participants")
+async def get_registered_participants():
+    """
+    Endpoint to get the list of registered participants.
+    """
+    registered_clients = R.smembers("clients:registered")
+    if not registered_clients:
+        raise HTTPException(status_code=404, detail="No registered clients found.")
+
+    return {"registered_clients": list(registered_clients)}
+
+
 @router.get("/aggregation/phase/{phase_id}/check_for_task")
 async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: int):
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
