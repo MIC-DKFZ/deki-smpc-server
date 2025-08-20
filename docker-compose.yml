@@ -2,7 +2,6 @@
 x-defaults: &default-settings
   HOST: 0.0.0.0
   NUM_CLIENTS: 4
-  EPOCHS: 1
 
 services:
   key-aggregation-server:

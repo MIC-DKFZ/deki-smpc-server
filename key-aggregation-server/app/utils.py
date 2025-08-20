@@ -98,7 +98,7 @@ class ActiveTasks(Task):
         """
         with self.lock:
             self.tasks.clear()
-            logging.info("All tasks cleared.")
+            logging.info("All phase 1 tasks cleared.")
 
 
 class ActiveTasksPhase2(Task):
@@ -198,7 +198,7 @@ class ActiveTasksPhase2(Task):
             self.tasks.clear()
             self.pending_tasks.clear()
             self.dependency_map.clear()
-            logging.info("All tasks cleared.")
+            logging.info("All phase 2 tasks cleared.")
 
     def load_tasks_from_json(self, task_data: dict, queue_name: str):
         """

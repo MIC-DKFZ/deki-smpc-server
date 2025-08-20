@@ -272,16 +272,17 @@ async def debug_tasks():
     return data
 
 
-@router.post("/tasks/reset")
-async def reset_tasks():
+def _reset_all_state():
+    """Internal helper to reset all state (shared by /tasks/reset and finished indication)."""
     # Clear all tasks and queues
     R.delete("queue:aggregation:initial")
     R.delete("queue:aggregation:groups")
     tasks_phase_1.clear_tasks()
     tasks_phase_2.clear_tasks()
 
-    # Delete all registered clients
+    # Delete all registered & finished clients
     R.delete("clients:registered")
+    R.delete("clients:finished")
 
     # Reset the phase in Redis
     R.set("phase", 1)
@@ -295,8 +296,10 @@ async def reset_tasks():
     # Clear the first senders
     R.delete("phase:1:first_senders")
 
-    asyncio.create_task(define_aggregation_flow())
 
+@router.post("/tasks/reset")
+async def reset_tasks():
+    _reset_all_state()
     return {"message": "All tasks and queues have been reset."}
 
 
@@ -438,3 +441,37 @@ async def is_client_first_sender():
     """
     first_senders = json.loads(R.get("phase:1:first_senders") or "[]")
     return {"first_senders": first_senders}
+
+
+@router.post("/aggregation/finished")
+async def indicate_finished(indicate_finished_request: CheckForTaskRequest):
+    """Indicate that a client has finished all processing. When all registered clients
+    have indicated completion, trigger a full reset.
+    """
+    client_name = indicate_finished_request.client_name
+    if not R.sismember("clients:registered", client_name):
+        raise HTTPException(status_code=400, detail="Client not registered")
+
+    # Add to finished set
+    R.sadd("clients:finished", client_name)
+
+    finished_clients = R.smembers("clients:finished")
+    registered_clients = R.smembers("clients:registered")
+
+    reset_triggered = False
+    # Only trigger if every registered client has finished and there is at least one client
+    if registered_clients and finished_clients == registered_clients:
+        # Use a simple lock to avoid duplicate resets in race conditions
+        if R.setnx("reset:lock", int(time.time())):
+            R.expire("reset:lock", 10)  # auto-expire lock just in case
+            logging.info("All clients indicated finished. Performing reset...")
+            _reset_all_state()
+            reset_triggered = True
+        else:
+            logging.info("Reset already in progress or completed by another client.")
+
+    return {
+        "finished_clients": list(finished_clients),
+        "registered_clients": list(registered_clients),
+        "reset_triggered": reset_triggered,
+    }
