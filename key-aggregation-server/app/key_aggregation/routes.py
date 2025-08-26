@@ -4,11 +4,15 @@ import json
 import logging
 import secrets
 import time
+from typing import Dict, Optional, Tuple
 
 import bcrypt
 from app.config import HASHED_PRESHARED_SECRET, NUM_CLIENTS, R_BINARY, R
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse
+from fastapi.responses import Response
+from fastapi.responses import Response as FastAPIResponse
+from fastapi.responses import StreamingResponse
 from models import CheckForTaskRequest, KeyClientRegistration
 from starlette.requests import Request
 from utils import ActiveTasks, ActiveTasksPhase2
@@ -21,6 +25,10 @@ tasks_phase_2 = ActiveTasksPhase2()
 
 # Store Phase in Redis
 R.set("phase", 1)
+
+# In-RAM store: model_id -> (bytes, filename, content_type)
+_store: Dict[str, Tuple[bytes, str, str]] = {}
+_lock = asyncio.Lock()  # protects _store
 
 
 async def __secure_shuffle(array: list) -> list:
@@ -137,6 +145,41 @@ async def schedule_next_task(queue):
         R.delete(queue)
 
 
+async def upload_artifact(model_id: str, request: Request) -> Response:
+    buf = bytearray()
+    async for chunk in request.stream():
+        if chunk:
+            buf.extend(chunk)
+
+    filename = f"{model_id}.bin"
+    content_type = request.headers.get("content-type") or "application/octet-stream"
+
+    data = bytes(buf)
+    async with _lock:
+        _store[model_id] = (data, filename, content_type)
+
+    return Response(status_code=204)
+
+
+async def download_artifact(model_id: str) -> FastAPIResponse:
+    """
+    Download bytes for the given model_id.
+    404 if the ID does not exist.
+    """
+    async with _lock:
+        entry: Optional[Tuple[bytes, str, str]] = _store.get(model_id)
+        if entry is None:
+            raise HTTPException(status_code=404, detail="No artifact for this model_id")
+        body, fname, ctype = entry
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="{fname}"',
+        "Content-Length": str(len(body)),
+        "Cache-Control": "no-store",
+    }
+    return FastAPIResponse(content=body, media_type=ctype, headers=headers)
+
+
 @router.get("/tasks/participants")
 async def get_phase_participants():
     return JSONResponse(
@@ -180,83 +223,59 @@ async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: 
             return Response(status_code=204)
 
 
-@router.post("/aggregation/phase/{phase_id}/upload")
-async def upload_weights(
-    phase_id: int, key: UploadFile = File(...), client_name: str = Form(...)
-):
+@router.put("/aggregation/upload")
+async def upload_weights(request: Request):
     """
     Endpoint to upload weights for a specific phase.
     """
-    start_time = time.time()
-    contents = await key.read()
+
+    phase_id = int(request.headers.get("X-Phase"))
+    client_name = request.headers.get("X-Client-Name")
 
     if phase_id == 1:
         task = tasks_phase_1.check_for_task(client_name)["task"]
         sender = task["from"]
         receiver = task["to"]
-        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
-        R_BINARY.set(redis_key, contents)
+        model_id = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        response = await upload_artifact(model_id=model_id, request=request)
         tasks_phase_1.complete_task(client_name)
     else:
         task = tasks_phase_2.check_for_task(client_name)["task"]
         sender = task["from"]
         receiver = task["to"]
-        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
-        R_BINARY.set(redis_key, contents)
+        model_id = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        response = await upload_artifact(model_id=model_id, request=request)
         tasks_phase_2.complete_task(client_name)
 
-    duration = time.time() - start_time
-    logging.info(
-        f"Upload weights for phase {phase_id} by {client_name} took {duration:.2f} seconds."
-    )
-    return {"message": f"Weights uploaded for {client_name}", "duration": duration}
+    return response
 
 
-@router.get("/aggregation/phase/{phase_id}/download")
-async def download_weights(check_for_task_request: CheckForTaskRequest, phase_id: int):
+@router.get("/aggregation/download")
+async def download_weights(request: Request):
     """
     Endpoint to download weights for a specific phase.
     """
-    start_time = time.time()
+
+    phase_id = int(request.headers.get("X-Phase"))
+    client_name = request.headers.get("X-Client-Name")
 
     if phase_id == 1:
-        task = tasks_phase_1.check_for_task(check_for_task_request.client_name)["task"]
+        task = tasks_phase_1.check_for_task(client_name)["task"]
         sender = task["from"]
         receiver = task["to"]
-        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
-        contents = R_BINARY.get(redis_key)
-        if contents is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Weights not found for client {check_for_task_request.client_name}",
-            )
-
-        task_queue = tasks_phase_1.complete_task(check_for_task_request.client_name)
+        model_id = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        response = await download_artifact(model_id=model_id)
+        task_queue = tasks_phase_1.complete_task(client_name)
         asyncio.create_task(schedule_next_task(task_queue["queue"]))
     else:
-        task = tasks_phase_2.check_for_task(check_for_task_request.client_name)["task"]
+        task = tasks_phase_2.check_for_task(client_name)["task"]
         sender = task["from"]
         receiver = task["to"]
-        redis_key = f"phase:{phase_id}:weights:{sender}:{receiver}"
-        contents = R_BINARY.get(redis_key)
-        if contents is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Weights not found for client {check_for_task_request.client_name}",
-            )
-        tasks_phase_2.complete_task(check_for_task_request.client_name)
+        model_id = f"phase:{phase_id}:weights:{sender}:{receiver}"
+        response = await download_artifact(model_id=model_id)
+        tasks_phase_2.complete_task(client_name)
 
-    duration = time.time() - start_time
-    logging.info(
-        f"Download weights for phase {phase_id} by {check_for_task_request.client_name} took {duration:.2f} seconds."
-    )
-
-    filename = f"{check_for_task_request.client_name}_weights.pt.gz"
-    return StreamingResponse(
-        io.BytesIO(contents),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
+    return response
 
 
 @router.get("/redis/keys")
@@ -272,7 +291,7 @@ async def debug_tasks():
     return data
 
 
-def _reset_all_state():
+async def _reset_all_state():
     """Internal helper to reset all state (shared by /tasks/reset and finished indication)."""
     # Clear all tasks and queues
     R.delete("queue:aggregation:initial")
@@ -293,13 +312,17 @@ def _reset_all_state():
     # Clear the final sum
     R.delete("final:sum")
 
+    # Clear the buffer
+    async with _lock:
+        _store.clear()
+
     # Clear the first senders
     R.delete("phase:1:first_senders")
 
 
 @router.post("/tasks/reset")
 async def reset_tasks():
-    _reset_all_state()
+    await _reset_all_state()
     return {"message": "All tasks and queues have been reset."}
 
 
@@ -465,7 +488,7 @@ async def indicate_finished(indicate_finished_request: CheckForTaskRequest):
         if R.setnx("reset:lock", int(time.time())):
             R.expire("reset:lock", 10)  # auto-expire lock just in case
             logging.info("All clients indicated finished. Performing reset...")
-            _reset_all_state()
+            await _reset_all_state()
             reset_triggered = True
         else:
             logging.info("Reset already in progress or completed by another client.")
