@@ -10,8 +10,8 @@ from app.config import (
     NUM_CLIENTS,
     aggregated_state_dict,
     aggregated_state_dict_lock,
-    file_transfer_fl,
 )
+from app.utils import file_transfer_fl
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response as FastAPIResponse
 from starlette.requests import Request

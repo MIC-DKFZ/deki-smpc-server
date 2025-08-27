@@ -4,6 +4,7 @@ import logging
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
+from config import R, aggregated_state_dict, aggregated_state_dict_lock
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import Response
 from fastapi.responses import Response as FastAPIResponse
@@ -281,3 +282,45 @@ class FileTransfer:
             "Cache-Control": "no-store",
         }
         return FastAPIResponse(content=body, media_type=ctype, headers=headers)
+
+
+tasks_phase_1 = ActiveTasks()
+tasks_phase_2 = ActiveTasksPhase2()
+
+file_transfer_aggregation = FileTransfer()
+file_transfer_fl = FileTransfer()
+
+
+async def reset_all_state():
+    """Internal helper to reset"""
+    # Clear all tasks and queues
+    R.delete("queue:aggregation:initial")
+    R.delete("queue:aggregation:groups")
+    tasks_phase_1.clear_tasks()
+    tasks_phase_2.clear_tasks()
+
+    # Delete all registered & finished clients
+    R.delete("clients:registered")
+    R.delete("clients:finished")
+
+    # Reset the phase in Redis
+    R.set("phase", 1)
+
+    # Clear the model weights
+    for key in sorted(R.keys("phase:*:weights:*")):
+        R.delete(key)
+    # Clear the final sum
+    R.delete("final:sum")
+
+    # Clear the buffers
+    async with file_transfer_aggregation._lock:
+        file_transfer_aggregation._store.clear()
+    async with file_transfer_fl._lock:
+        file_transfer_fl._store.clear()
+
+    async with aggregated_state_dict_lock:
+        global aggregated_state_dict
+        aggregated_state_dict = None
+
+    # Clear the first senders
+    R.delete("phase:1:first_senders")

@@ -7,7 +7,6 @@ from typing import Dict, Optional
 import bcrypt
 import redis
 import torch
-from utils import ActiveTasks, ActiveTasksPhase2, FileTransfer
 
 logging.basicConfig(level=logging.INFO)
 
@@ -27,14 +26,6 @@ R_BINARY = redis.Redis(
 )  # decode_responses=False is default
 # Store Phase in Redis
 R.set("phase", 1)
-
-# Initialize active tasks
-tasks_phase_1 = ActiveTasks()
-tasks_phase_2 = ActiveTasksPhase2()
-
-# File transfer utility
-file_transfer_aggregation = FileTransfer()
-file_transfer_fl = FileTransfer()
 
 # Global variable to hold the aggregated model
 aggregated_state_dict: Optional[Dict[str, torch.Tensor]] = None

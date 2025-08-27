@@ -6,12 +6,10 @@ import secrets
 import time
 
 import bcrypt
-from app.config import (
-    HASHED_PRESHARED_SECRET,
-    NUM_CLIENTS,
-    R_BINARY,
-    R,
+from app.config import HASHED_PRESHARED_SECRET, NUM_CLIENTS, R_BINARY, R
+from app.utils import (
     file_transfer_aggregation,
+    reset_all_state,
     tasks_phase_1,
     tasks_phase_2,
 )
@@ -148,18 +146,6 @@ async def get_phase_participants():
     )
 
 
-@router.get("/registered-participants")
-async def get_registered_participants():
-    """
-    Endpoint to get the list of registered participants.
-    """
-    registered_clients = R.smembers("clients:registered")
-    if not registered_clients:
-        raise HTTPException(status_code=404, detail="No registered clients found.")
-
-    return {"registered_clients": list(registered_clients)}
-
-
 @router.get("/aggregation/phase/{phase_id}/check_for_task")
 async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: int):
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
@@ -240,54 +226,6 @@ async def download_weights(request: Request):
     return response
 
 
-@router.get("/redis/keys")
-async def get_redis_keys():
-    return R.keys("phase:*")
-
-
-@router.get("/tasks")
-async def debug_tasks():
-    data = {}
-    for key in sorted(R.keys("queue:aggregation:*")):
-        data[key] = R.lrange(key, 0, -1)
-    return data
-
-
-async def _reset_all_state():
-    """Internal helper to reset all state (shared by /tasks/reset and finished indication)."""
-    # Clear all tasks and queues
-    R.delete("queue:aggregation:initial")
-    R.delete("queue:aggregation:groups")
-    tasks_phase_1.clear_tasks()
-    tasks_phase_2.clear_tasks()
-
-    # Delete all registered & finished clients
-    R.delete("clients:registered")
-    R.delete("clients:finished")
-
-    # Reset the phase in Redis
-    R.set("phase", 1)
-
-    # Clear the model weights
-    for key in sorted(R.keys("phase:*:weights:*")):
-        R.delete(key)
-    # Clear the final sum
-    R.delete("final:sum")
-
-    # Clear the buffer
-    async with file_transfer_aggregation._lock:
-        file_transfer_aggregation._store.clear()
-
-    # Clear the first senders
-    R.delete("phase:1:first_senders")
-
-
-@router.post("/tasks/reset")
-async def reset_tasks():
-    await _reset_all_state()
-    return {"message": "All tasks and queues have been reset."}
-
-
 @router.get("/aggregation/phase/{phase_id}/active_tasks")
 async def get_active_tasks(phase_id: int):
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
@@ -296,22 +234,6 @@ async def get_active_tasks(phase_id: int):
     else:
         active_tasks = tasks_phase_2.get_all_tasks()
     return active_tasks
-
-
-@router.get("/redis/queues")
-async def get_redis_queues():
-    queues = {}
-    for key in sorted(R.keys("queue:aggregation:*")):
-        queues[key] = R.lrange(key, 0, -1)
-    return queues
-
-
-@router.get("/redis/queues/{queue_name}")
-async def get_redis_queue(queue_name: str):
-    queue = R.lrange(f"queue:aggregation:{queue_name}", 0, -1)
-    if not queue:
-        raise HTTPException(status_code=404, detail="Queue not found")
-    return {queue_name: queue}
 
 
 @router.post("/register", response_model=KeyClientRegistration)
@@ -450,7 +372,7 @@ async def indicate_finished(indicate_finished_request: CheckForTaskRequest):
         if R.setnx("reset:lock", int(time.time())):
             R.expire("reset:lock", 10)  # auto-expire lock just in case
             logging.info("All clients indicated finished. Performing reset...")
-            await _reset_all_state()
+            await reset_all_state()
             reset_triggered = True
         else:
             logging.info("Reset already in progress or completed by another client.")
