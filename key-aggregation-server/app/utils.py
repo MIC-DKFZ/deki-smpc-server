@@ -1,7 +1,12 @@
+import asyncio
 import json
 import logging
 from threading import Lock
-from typing import List
+from typing import Dict, List, Optional, Tuple
+
+from fastapi import HTTPException, Request, Response
+from fastapi.responses import Response
+from fastapi.responses import Response as FastAPIResponse
 
 logging.basicConfig(level=logging.INFO)
 
@@ -236,3 +241,43 @@ class ActiveTasksPhase2(Task):
 
     def get_last_recipient(self) -> str | None:
         return self.last_recipient
+
+
+class FileTransfer:
+    def __init__(self):
+        self._store: Dict[str, Tuple[bytes, str]] = {}
+        self._lock = asyncio.Lock()
+
+    async def upload_artifact(self, model_id: str, request: Request) -> Response:
+        buf = bytearray()
+        async for chunk in request.stream():
+            if chunk:
+                buf.extend(chunk)
+
+        content_type = request.headers.get("content-type") or "application/octet-stream"
+
+        data = bytes(buf)
+        async with self._lock:
+            self._store[model_id] = (data, content_type)
+
+        return Response(status_code=204)
+
+    async def download_artifact(self, model_id: str) -> FastAPIResponse:
+        """
+        Download bytes for the given model_id.
+        404 if the ID does not exist.
+        """
+        async with self._lock:
+            entry: Optional[Tuple[bytes, str]] = self._store.get(model_id)
+            if entry is None:
+                raise HTTPException(
+                    status_code=404, detail="No artifact for this model_id"
+                )
+            body, ctype = entry
+
+        headers = {
+            "Content-Disposition": f'attachment; filename="{model_id}.bin"',
+            "Content-Length": str(len(body)),
+            "Cache-Control": "no-store",
+        }
+        return FastAPIResponse(content=body, media_type=ctype, headers=headers)

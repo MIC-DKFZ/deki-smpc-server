@@ -1,31 +1,45 @@
 import asyncio
-import gzip
 import io
 import logging
 from io import BytesIO
+from typing import Dict, Optional
 
 import torch
-from app.config import DEVICE, NUM_CLIENTS, R_BINARY
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import StreamingResponse
+from app.config import DEVICE, NUM_CLIENTS
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response as FastAPIResponse
+from starlette.requests import Request
+from utils import FileTransfer
 
 # Create a router
 router = APIRouter()
+file_transfer_fl = FileTransfer()
+
+# Global variable to hold the aggregated model
+aggregated_state_dict: Optional[Dict[str, torch.Tensor]] = None
+lock = asyncio.Lock()
 
 
-@router.post("/upload")
-async def upload_model(model: UploadFile = File(...), client_name: str = Form(...)):
+@router.put("/upload")
+async def upload_model(request: Request):
     """
     Endpoint to upload the model for secure federated learning.
     """
-    contents = await model.read()
-    redis_key = f"model:{client_name}"
-    R_BINARY.set(redis_key, contents)
+
+    client_name = request.headers.get("X-Client-Name")
+
+    model_id = f"fl:{client_name}:weights"
+
+    response = await file_transfer_fl.upload_artifact(
+        model_id=model_id, request=request
+    )
 
     # After upload, check if all clients have uploaded and trigger aggregation if so
     asyncio.create_task(aggregate_models_if_ready())
 
-    return {"message": f"Model uploaded by {client_name}"}
+    logging.info(f"Shielded model uploaded by {client_name}")
+
+    return response
 
 
 async def aggregate_models_if_ready():
@@ -33,52 +47,33 @@ async def aggregate_models_if_ready():
     Aggregate all uploaded models: sum their tensors, store as 'model:final', and delete all model keys from Redis.
     Handles lz4, gzip, and non-compressed model files robustly.
     """
-    try:
-        # List all model:* keys except 'model:final'
-        keys = [k for k in R_BINARY.keys("model:*") if k != b"model:final"]
-        if len(keys) == NUM_CLIENTS:
-            # Only aggregate if 'model:final' does not exist
-            if not R_BINARY.exists("model:final"):
-                import lz4.frame
+    intermediate_aggregated_state_dict: Optional[Dict[str, torch.Tensor]] = None
 
-                models = []
-                for key in keys:
-                    model_bytes = R_BINARY.get(key)
-                    buffer = BytesIO(model_bytes)
-                    magic = buffer.read(4)
-                    buffer.seek(0)
-                    try:
-                        if magic[:2] == b"\x1f\x8b":  # gzip
-                            with gzip.GzipFile(fileobj=buffer, mode="rb") as f:
-                                model_data = torch.load(f, map_location=DEVICE)
-                        elif magic == b"\x04\x22\x4d\x18":  # lz4
-                            with lz4.frame.open(buffer, mode="rb") as f:
-                                model_data = torch.load(f, map_location=DEVICE)
-                        else:  # raw torch
-                            model_data = torch.load(buffer, map_location=DEVICE)
-                    except Exception as e:
-                        logging.error(f"Error loading model from key {key}: {e}")
-                        raise
-                    models.append(model_data)
-                # Sum all models
-                agg_model = models[0]
-                for m in models[1:]:
-                    for k in agg_model.keys():
-                        agg_model[k] += m[k]
-                # Save aggregated model to bytes (lz4)
-                out_buffer = BytesIO()
-                with lz4.frame.open(out_buffer, mode="wb") as f:
-                    torch.save(agg_model, f)
-                out_buffer.seek(0)
-                R_BINARY.set("model:final", out_buffer.read())
-                # Delete all model:* keys except 'model:final'
-                for key in keys:
-                    R_BINARY.delete(key)
-                logging.info(
-                    f"Aggregated {NUM_CLIENTS} models. Summed and set as final (lz4). Deleted all model keys."
-                )
-    except Exception as e:
-        logging.error(f"Error in aggregate_models_if_ready: {e}")
+    async with file_transfer_fl._lock:
+        if len(file_transfer_fl._store) == NUM_CLIENTS:
+            logging.info("All models uploaded, starting aggregation...")
+            for _, (data, _) in file_transfer_fl._store.items():
+                state_dict = torch.load(BytesIO(data), map_location=DEVICE)
+
+                if intermediate_aggregated_state_dict is None:
+                    intermediate_aggregated_state_dict = state_dict
+                else:
+                    for k in intermediate_aggregated_state_dict.keys():
+                        intermediate_aggregated_state_dict[k] += state_dict[k]
+
+            async with lock:
+                # Store the aggregated model
+                global aggregated_state_dict
+                aggregated_state_dict = intermediate_aggregated_state_dict
+
+            # Empty the store
+            file_transfer_fl._store.clear()
+
+            logging.info("Model aggregation complete")
+        else:
+            logging.info(
+                f"Waiting for {NUM_CLIENTS - len(file_transfer_fl._store)} more clients to upload."
+            )
 
 
 @router.get("/download")
@@ -86,17 +81,24 @@ async def retrieve_model():
     """
     Endpoint to retrieve the final accumulated model.
     """
-    content = R_BINARY.get(f"model:final")
+    async with lock:
+        global aggregated_state_dict
+        if aggregated_state_dict is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Final model not found.",
+            )
 
-    if content is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Final model not found.",
+        bio = io.BytesIO()
+        torch.save(aggregated_state_dict, bio, _use_new_zipfile_serialization=True)
+        data = bio.getvalue()
+
+        headers = {
+            "Content-Disposition": f'attachment; filename="final.bin"',
+            "Content-Length": str(len(data)),
+            "Cache-Control": "no-store",
+        }
+
+        return FastAPIResponse(
+            content=data, media_type="application/octet-stream", headers=headers
         )
-
-    filename = f"final_model.pt.gz"
-    return StreamingResponse(
-        io.BytesIO(content),
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
