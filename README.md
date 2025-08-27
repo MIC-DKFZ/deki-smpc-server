@@ -49,7 +49,3 @@ The following environment variables are used (with their default values):
 | `REDIS_PORT`        | Redis port                                | `6379`                                |
 
 You can override any of these by editing the `docker-compose.yml` file.
-
-## ⚠️ Work in Progress
-
-This is currently a work in progress to transfer the implementation used for the experiments in the paper into a clean and fully usable implementation.
