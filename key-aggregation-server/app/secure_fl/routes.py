@@ -5,19 +5,19 @@ from io import BytesIO
 from typing import Dict, Optional
 
 import torch
-from app.config import DEVICE, NUM_CLIENTS
+from app.config import (
+    DEVICE,
+    NUM_CLIENTS,
+    aggregated_state_dict,
+    aggregated_state_dict_lock,
+    file_transfer_fl,
+)
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response as FastAPIResponse
 from starlette.requests import Request
-from utils import FileTransfer
 
 # Create a router
 router = APIRouter()
-file_transfer_fl = FileTransfer()
-
-# Global variable to hold the aggregated model
-aggregated_state_dict: Optional[Dict[str, torch.Tensor]] = None
-lock = asyncio.Lock()
 
 
 @router.put("/upload")
@@ -61,7 +61,7 @@ async def aggregate_models_if_ready():
                     for k in intermediate_aggregated_state_dict.keys():
                         intermediate_aggregated_state_dict[k] += state_dict[k]
 
-            async with lock:
+            async with aggregated_state_dict_lock:
                 # Store the aggregated model
                 global aggregated_state_dict
                 aggregated_state_dict = intermediate_aggregated_state_dict
@@ -81,7 +81,7 @@ async def retrieve_model():
     """
     Endpoint to retrieve the final accumulated model.
     """
-    async with lock:
+    async with aggregated_state_dict_lock:
         global aggregated_state_dict
         if aggregated_state_dict is None:
             raise HTTPException(

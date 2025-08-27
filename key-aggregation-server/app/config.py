@@ -1,10 +1,13 @@
+import asyncio
 import logging
 import os
 from hashlib import sha256
+from typing import Dict, Optional
 
 import bcrypt
 import redis
 import torch
+from utils import ActiveTasks, ActiveTasksPhase2, FileTransfer
 
 logging.basicConfig(level=logging.INFO)
 
@@ -22,7 +25,20 @@ R = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
 R_BINARY = redis.Redis(
     host=REDIS_HOST, port=REDIS_PORT, db=0
 )  # decode_responses=False is default
+# Store Phase in Redis
+R.set("phase", 1)
 
+# Initialize active tasks
+tasks_phase_1 = ActiveTasks()
+tasks_phase_2 = ActiveTasksPhase2()
+
+# File transfer utility
+file_transfer_aggregation = FileTransfer()
+file_transfer_fl = FileTransfer()
+
+# Global variable to hold the aggregated model
+aggregated_state_dict: Optional[Dict[str, torch.Tensor]] = None
+aggregated_state_dict_lock = asyncio.Lock()
 
 # Device
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

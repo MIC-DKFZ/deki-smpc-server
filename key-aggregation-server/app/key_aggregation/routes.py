@@ -6,24 +6,22 @@ import secrets
 import time
 
 import bcrypt
-from app.config import HASHED_PRESHARED_SECRET, NUM_CLIENTS, R_BINARY, R
+from app.config import (
+    HASHED_PRESHARED_SECRET,
+    NUM_CLIENTS,
+    R_BINARY,
+    R,
+    file_transfer_aggregation,
+    tasks_phase_1,
+    tasks_phase_2,
+)
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import JSONResponse
-from fastapi.responses import Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from models import CheckForTaskRequest, KeyClientRegistration
 from starlette.requests import Request
-from utils import ActiveTasks, ActiveTasksPhase2, FileTransfer
 
 # Create a router
 router = APIRouter()
-
-tasks_phase_1 = ActiveTasks()
-tasks_phase_2 = ActiveTasksPhase2()
-file_transfer_aggregation = FileTransfer()
-
-# Store Phase in Redis
-R.set("phase", 1)
 
 
 async def __secure_shuffle(array: list) -> list:
