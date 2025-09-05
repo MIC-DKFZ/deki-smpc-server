@@ -1,28 +1,22 @@
 
 x-defaults: &default-settings
   HOST: 0.0.0.0
-  NUM_CLIENTS: 4
-  KEEP_MODELS_IN_RAM: "true"
+  NUM_CLIENTS: 2
+  PRESHARED_SECRET: my_secure_presHared_secret_123!
+  PORT: 8080
 
 services:
-  key-aggregation-server:
-    build: ./key-aggregation-server
+  key-distribution-server:
+    build: ./key-distribution-server
     ports:
       - "8080:8080"
     environment:
       <<: *default-settings
-      PORT: 8080
-      PRESHARED_SECRET: my_secure_presHared_secret_123!
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-    deploy:
-      resources:
-        reservations:
-          devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
-  redis:
-    image: redis:latest
+
+  fl-server:
+    build: ./fl-server
     ports:
-      - "6379:6379"
+      - "8081:8081"
+    environment:
+      <<: *default-settings
+      PORT: 8081

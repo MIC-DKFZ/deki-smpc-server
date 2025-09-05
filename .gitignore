@@ -1,2 +1,4 @@
 __pycache__
 redis_data
+*.key
+*.txt
