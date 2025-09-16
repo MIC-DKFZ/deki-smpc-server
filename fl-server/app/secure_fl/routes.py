@@ -1,20 +1,16 @@
 import asyncio
+import hashlib
 import logging
 from typing import List, Tuple
 
 from app.config import NUM_CLIENTS
-from app.utils import (
-    bytes_to_polynomial,
-    file_transfer_fl,
-    pack_chunks,
-)
+from app.utils import bytes_to_polynomial, file_transfer_fl, pack_chunks
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response as FastAPIResponse
+from fastapi.responses import StreamingResponse
+from openfhe import BINARY, Serialize
 from starlette.requests import Request
 from tqdm import tqdm
-from openfhe import BINARY, Serialize
-import hashlib
-from fastapi.responses import StreamingResponse
 
 # Create a router
 router = APIRouter()
@@ -27,6 +23,9 @@ register_client_lock = asyncio.Lock()
 
 aggregate_completed = False
 aggregate_completed_lock = asyncio.Lock()
+
+successful_aggregation_downloads = set()
+successful_aggregation_downloads_lock = asyncio.Lock()
 
 
 async def check_all_clients_uploaded() -> bool:
@@ -201,3 +200,42 @@ async def get_model_aggregation_completed():
     """
     async with aggregate_completed_lock:
         return {"model_aggregation_completed": aggregate_completed}
+
+
+async def reset_server_state():
+    async with file_transfer_fl._lock:
+        file_transfer_fl._store.clear()
+    async with aggregate_model_lock:
+        global aggregate_model
+        aggregate_model = None
+    async with register_client_lock:
+        registered_clients.clear()
+    async with aggregate_completed_lock:
+        global aggregate_completed
+        aggregate_completed = False
+    async with successful_aggregation_downloads_lock:
+        successful_aggregation_downloads.clear()
+    logging.info("Server state has been reset.")
+
+
+@router.post("/mark-aggregation-download-complete")
+async def mark_aggregation_download_complete(request: Request):
+    """
+    Endpoint for clients to mark that they have successfully downloaded the aggregated model.
+    """
+    client_name = request.headers.get("X-Client-Name")
+    if not client_name:
+        raise HTTPException(status_code=400, detail="Missing X-Client-Name header")
+
+    async with successful_aggregation_downloads_lock:
+        if client_name in successful_aggregation_downloads:
+            logging.info(f"Client {client_name} has already marked download complete.")
+        else:
+            successful_aggregation_downloads.add(client_name)
+            logging.info(f"Client {client_name} marked download complete.")
+
+    if len(successful_aggregation_downloads) == int(NUM_CLIENTS):
+        logging.info("All clients have successfully downloaded the aggregated model.")
+        asyncio.create_task(reset_server_state())
+
+    return {"message": f"Client {client_name} marked download complete."}
