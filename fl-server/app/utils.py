@@ -6,7 +6,7 @@ import tempfile
 from typing import Dict, List, Tuple
 
 from fastapi import Request, Response
-from openfhe import BINARY, DeserializeCiphertext, SerializeToFile
+from openfhe import BINARY, DeserializeCiphertext
 
 logging.basicConfig(level=logging.INFO)
 
@@ -80,14 +80,6 @@ async def unpack_chunks(blob):
         raise ValueError("Trailing bytes after last chunk")
 
     return chunks
-
-
-async def polynomial_to_bytes(poly) -> bytes:
-    with tempfile.TemporaryDirectory() as tmpdirname:
-        SerializeToFile(os.path.join(tmpdirname, "poly.txt"), poly, BINARY)
-        with open(os.path.join(tmpdirname, "poly.txt"), "rb") as f:
-            data = f.read()
-    return data
 
 
 async def bytes_to_polynomial(data: bytes):

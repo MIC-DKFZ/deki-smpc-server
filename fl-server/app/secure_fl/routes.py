@@ -7,18 +7,26 @@ from app.utils import (
     bytes_to_polynomial,
     file_transfer_fl,
     pack_chunks,
-    polynomial_to_bytes,
 )
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response as FastAPIResponse
 from starlette.requests import Request
 from tqdm import tqdm
+from openfhe import BINARY, Serialize
+import hashlib
+from fastapi.responses import StreamingResponse
 
 # Create a router
 router = APIRouter()
 
 aggregate_model: Tuple[bytes, str, int] = None
 aggregate_model_lock = asyncio.Lock()
+
+registered_clients = set()
+register_client_lock = asyncio.Lock()
+
+aggregate_completed = False
+aggregate_completed_lock = asyncio.Lock()
 
 
 async def check_all_clients_uploaded() -> bool:
@@ -94,37 +102,102 @@ async def aggregate_models_if_ready():  # TODO
         global aggregate_model
         aggregate_model = (
             await pack_chunks(
-                [
-                    await polynomial_to_bytes(poly)
-                    for poly in intermediate_aggregate_model
-                ]
+                [Serialize(poly, BINARY) for poly in intermediate_aggregate_model]
             ),
             "aggregated_model",
             len(intermediate_aggregate_model),
         )
+    async with aggregate_completed_lock:
+        global aggregate_completed
+        aggregate_completed = True
 
     logging.info("Aggregated model is ready for download.")
 
 
 @router.get("/download-aggregate")
 async def download_aggregate_model(request: Request):
-    """
-    Endpoint to download the aggregated model for secure federated learning.
-    """
     client_name = request.headers.get("X-Client-Name")
 
     async with aggregate_model_lock:
         global aggregate_model
         if aggregate_model is None:
-            raise HTTPException(status_code=404, detail="No aggregated model available")
+            raise HTTPException(status_code=204, detail="No aggregated model available")
         data, model_id, total_chunks = aggregate_model
 
-    logging.info(f"Client {client_name} is downloading the aggregated model.")
-
+    # Hash and length
+    sha256 = hashlib.sha256(data).hexdigest()
     headers = {
         "Content-Type": "application/octet-stream",
         "X-Model-ID": model_id,
         "X-Chunk-Total": str(total_chunks),
+        "X-Content-SHA256": sha256,
+        "Content-Length": str(len(data)),
     }
 
-    return FastAPIResponse(content=data, headers=headers)
+    # Stream to avoid huge memory spikes in intermediates
+    return StreamingResponse(
+        iter([data]), headers=headers, media_type="application/octet-stream"
+    )
+
+
+async def check_all_clients_registered() -> bool:
+    async with register_client_lock:
+        return len(registered_clients) == int(NUM_CLIENTS)
+
+
+@router.post("/register-client")
+async def register_client(request: Request):
+    """
+    Endpoint to register a new client for federated learning.
+    """
+    client_name = request.headers.get("X-Client-Name")
+    if not client_name:
+        raise HTTPException(status_code=400, detail="Missing X-Client-Name header")
+
+    async with register_client_lock:
+        if client_name in registered_clients:
+            logging.info(f"Client {client_name} is already registered.")
+        else:
+            registered_clients.add(client_name)
+            logging.info(f"Client {client_name} registered successfully.")
+
+    if await check_all_clients_registered():
+        logging.info("All clients have registered for federated learning.")
+
+    return {"message": f"Client {client_name} registered successfully."}
+
+
+@router.get("/registered-clients")
+async def get_registered_clients():
+    """
+    Endpoint to get the list of registered clients.
+    """
+    async with register_client_lock:
+        return {"registered_clients": list(registered_clients)}
+
+
+@router.get("/all-clients-registered")
+async def get_all_clients_registered():
+    """
+    Endpoint to check if all clients are registered.
+    """
+    all_registered = await check_all_clients_registered()
+    return {"all_clients_registered": all_registered}
+
+
+@router.get("/all-clients-uploaded")
+async def get_all_clients_uploaded():
+    """
+    Endpoint to check if all clients have uploaded their models.
+    """
+    all_uploaded = await check_all_clients_uploaded()
+    return {"all_clients_uploaded": all_uploaded}
+
+
+@router.get("/model-aggregation-completed")
+async def get_model_aggregation_completed():
+    """
+    Endpoint to check if model aggregation is completed.
+    """
+    async with aggregate_completed_lock:
+        return {"model_aggregation_completed": aggregate_completed}
