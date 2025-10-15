@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import time
 from io import BytesIO
 from typing import Dict, Optional
 
@@ -51,6 +52,7 @@ async def aggregate_models_if_ready():
 
     async with file_transfer_fl._lock:
         if len(file_transfer_fl._store) == NUM_CLIENTS:
+            start_time = time.time()
             logging.info("All models uploaded, starting aggregation...")
             for _, (data, _) in file_transfer_fl._store.items():
                 state_dict = torch.load(BytesIO(data), map_location=DEVICE)
@@ -70,6 +72,7 @@ async def aggregate_models_if_ready():
             file_transfer_fl._store.clear()
 
             logging.info("Model aggregation complete")
+            logging.info(f"Aggregation took {time.time() - start_time:.2f} seconds")
         else:
             logging.info(
                 f"Waiting for {NUM_CLIENTS - len(file_transfer_fl._store)} more clients to upload."
