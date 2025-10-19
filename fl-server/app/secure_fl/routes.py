@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+import time
 from typing import List, Tuple
 
 from app.config import NUM_CLIENTS
@@ -74,7 +75,7 @@ async def upload_model(request: Request):
 
 async def aggregate_models_if_ready():  # TODO
     logging.info("All models uploaded, starting aggregation...")
-
+    start_time = time.time()
     intermediate_aggregate_model: List[bytes] = []
     first = True
 
@@ -95,7 +96,7 @@ async def aggregate_models_if_ready():  # TODO
                     intermediate_aggregate_model[key], poly
                 )
 
-    logging.info("Aggregation complete.")
+    logging.info("Aggregation complete. Packing aggregated model...")
 
     async with aggregate_model_lock:
         global aggregate_model
@@ -111,6 +112,7 @@ async def aggregate_models_if_ready():  # TODO
         aggregate_completed = True
 
     logging.info("Aggregated model is ready for download.")
+    logging.info(f"Aggregation took {time.time() - start_time:.2f} seconds.")
 
 
 @router.get("/download-aggregate")
