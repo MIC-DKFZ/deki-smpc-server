@@ -1,0 +1,6 @@
+fastapi
+pydantic
+uvicorn[standard]
+bcrypt
+openfhe
+tqdm
