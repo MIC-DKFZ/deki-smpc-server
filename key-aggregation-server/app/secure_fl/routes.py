@@ -13,7 +13,7 @@ from app.config import (
     aggregated_state_dict_lock,
 )
 from app.utils import file_transfer_fl
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from fastapi.responses import Response as FastAPIResponse
 from starlette.requests import Request
 
@@ -22,7 +22,7 @@ router = APIRouter()
 
 
 @router.put("/upload")
-async def upload_model(request: Request):
+async def upload_model(request: Request) -> Response:
     """
     Endpoint to upload the model for secure federated learning.
     """
@@ -43,7 +43,7 @@ async def upload_model(request: Request):
     return response
 
 
-async def aggregate_models_if_ready():
+async def aggregate_models_if_ready() -> None:
     """
     Aggregate all uploaded models: sum their tensors, store as 'model:final', and delete all model keys from Redis.
     Handles lz4, gzip, and non-compressed model files robustly.
@@ -80,7 +80,7 @@ async def aggregate_models_if_ready():
 
 
 @router.get("/download")
-async def retrieve_model():
+async def retrieve_model() -> FastAPIResponse:
     """
     Endpoint to retrieve the final accumulated model.
     """

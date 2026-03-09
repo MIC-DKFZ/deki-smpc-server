@@ -2,11 +2,10 @@ import asyncio
 import json
 import logging
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 from config import R, aggregated_state_dict, aggregated_state_dict_lock
 from fastapi import HTTPException, Request, Response
-from fastapi.responses import Response
 from fastapi.responses import Response as FastAPIResponse
 
 logging.basicConfig(level=logging.INFO)
@@ -16,6 +15,28 @@ class Task:
     pass  # TODO: Implement the base Task class
 
 
+TaskRecord = TypedDict(
+    "TaskRecord",
+    {
+        "from": str,
+        "to": str,
+        "upload_done": bool,
+        "download_done": bool,
+        "queue": str,
+    },
+)
+
+
+class TaskAssignment(TypedDict):
+    action: str
+    task: TaskRecord
+
+
+class TaskSnapshot(TypedDict):
+    active: list[TaskRecord]
+    pending: list[TaskRecord]
+
+
 class ActiveTasks(Task):
     """
     Manages upload/download tasks for clients.
@@ -23,8 +44,8 @@ class ActiveTasks(Task):
     A download is only available after upload is completed.
     """
 
-    def __init__(self):
-        self.tasks = []
+    def __init__(self) -> None:
+        self.tasks: list[TaskRecord] = []
         self.lock = Lock()
 
     def add_task(self, sender: str, receiver: str, queue: str) -> None:
@@ -42,7 +63,7 @@ class ActiveTasks(Task):
             self.tasks.append(task)
             logging.info(f"Added task: {task}")
 
-    def check_for_task(self, client_name: str) -> dict | None:
+    def check_for_task(self, client_name: str) -> TaskAssignment | None:
         """
         Check if there's any task for this client.
         Returns one of:
@@ -66,7 +87,7 @@ class ActiveTasks(Task):
         logging.info(f"No task found for {client_name}")
         return None
 
-    def complete_task(self, client_name: str) -> dict | None:
+    def complete_task(self, client_name: str) -> TaskRecord | None:
         """
         Marks the upload or download as complete, depending on what’s available.
         Removes task if both upload and download are done.
@@ -91,7 +112,7 @@ class ActiveTasks(Task):
                     return task
         return None
 
-    def get_all_tasks(self) -> dict:
+    def get_all_tasks(self) -> TaskSnapshot:
         """
         Returns all current tasks (for inspection/debugging).
         """
@@ -108,16 +129,21 @@ class ActiveTasks(Task):
 
 
 class ActiveTasksPhase2(Task):
-    def __init__(self):
-        self.tasks = []  # Active tasks
-        self.pending_tasks = []  # Waiting on a dependency
-        self.dependency_map = {}  # Maps (from -> to) to their parent
+    def __init__(self) -> None:
+        self.tasks: list[TaskRecord] = []  # Active tasks
+        self.pending_tasks: list[TaskRecord] = []  # Waiting on dependency
+        self.dependency_map: dict[tuple[str, str], tuple[str, str]] = {}
         self.lock = Lock()
-        self.phase_2_clients = set()  # Clients that are in phase 2
-        self.phase_1_groups = {}  # Groups that are in phase 1
+        self.phase_2_clients: set[str] = set()  # Clients that are in phase 2
+        self.phase_1_groups: dict[int, list[str]] = {}  # Groups in phase 1
+        self.last_recipient: str | None = None
 
     def add_task(
-        self, sender: str, receiver: str, queue: str, depends_on: tuple | None = None
+        self,
+        sender: str,
+        receiver: str,
+        queue: str,
+        depends_on: tuple[str, str] | None = None,
     ) -> None:
         """
         Adds a task. If it depends on another task, it's put in pending until the dependency is done.
@@ -139,7 +165,7 @@ class ActiveTasksPhase2(Task):
                 self.tasks.append(task)
                 logging.info(f"Task added: {task}")
 
-    def check_for_task(self, client_name: str) -> dict | None:
+    def check_for_task(self, client_name: str) -> TaskAssignment | None:
         with self.lock:
             for task in self.tasks:
                 if task["from"] == client_name and not task["upload_done"]:
@@ -156,7 +182,7 @@ class ActiveTasksPhase2(Task):
             logging.info(f"No task found for {client_name}")
             return None
 
-    def complete_task(self, client_name: str) -> dict | None:
+    def complete_task(self, client_name: str) -> TaskRecord | None:
         with self.lock:
             for task in list(self.tasks):  # Copy to avoid mutation during iteration
                 if task["from"] == client_name and not task["upload_done"]:
@@ -176,7 +202,7 @@ class ActiveTasksPhase2(Task):
                     return task
         return None
 
-    def __activate_dependents(self, completed_task: dict):
+    def __activate_dependents(self, completed_task: TaskRecord) -> None:
         """
         Check if any pending task can now be activated.
         """
@@ -192,7 +218,7 @@ class ActiveTasksPhase2(Task):
             self.tasks.append(task)
             logging.info(f"Dependency met. Task activated: {task}")
 
-    def get_all_tasks(self) -> dict:
+    def get_all_tasks(self) -> TaskSnapshot:
         with self.lock:
             return {
                 "active": self.tasks.copy(),
@@ -206,7 +232,9 @@ class ActiveTasksPhase2(Task):
             self.dependency_map.clear()
             logging.info("All phase 2 tasks cleared.")
 
-    def load_tasks_from_json(self, task_data: dict, queue_name: str):
+    def load_tasks_from_json(
+        self, task_data: dict[str, list[str]], queue_name: str
+    ) -> None:
         """
         Parses the transmission task list and adds them to ActiveTasks.
         Determines dependencies automatically.
@@ -245,7 +273,7 @@ class ActiveTasksPhase2(Task):
 
 
 class FileTransfer:
-    def __init__(self):
+    def __init__(self) -> None:
         self._store: Dict[str, Tuple[bytes, str]] = {}
         self._lock = asyncio.Lock()
 
@@ -291,7 +319,7 @@ file_transfer_aggregation = FileTransfer()
 file_transfer_fl = FileTransfer()
 
 
-async def reset_all_state():
+async def reset_all_state() -> None:
     """Internal helper to reset"""
     # Clear all tasks and queues
     R.delete("queue:aggregation:initial")

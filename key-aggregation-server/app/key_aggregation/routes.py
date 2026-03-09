@@ -4,25 +4,26 @@ import json
 import logging
 import secrets
 import time
+from typing import Any
 
 import bcrypt
 from app.config import HASHED_PRESHARED_SECRET, NUM_CLIENTS, R_BINARY, R
 from app.utils import (
+    TaskSnapshot,
     file_transfer_aggregation,
     reset_all_state,
     tasks_phase_1,
     tasks_phase_2,
 )
 from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from models import CheckForTaskRequest, KeyClientRegistration
-from starlette.requests import Request
 
 # Create a router
 router = APIRouter()
 
 
-async def __secure_shuffle(array: list) -> list:
+async def __secure_shuffle(array: list[str]) -> list[str]:
     array = array[:]  # avoid modifying original list
     n = len(array)
     for i in range(n - 1, 0, -1):
@@ -31,8 +32,8 @@ async def __secure_shuffle(array: list) -> list:
     return array
 
 
-async def __form_initial_groups(registered_clients):
-    initial_groups = {}
+async def __form_initial_groups(registered_clients: list[str]) -> dict[int, list[str]]:
+    initial_groups: dict[int, list[str]] = {}
     num_clients = len(registered_clients)
     num_full_groups = num_clients // 3
     leftover = num_clients % 3
@@ -54,7 +55,7 @@ async def __form_initial_groups(registered_clients):
     return initial_groups
 
 
-async def define_aggregation_flow():
+async def define_aggregation_flow() -> None:
     # Clear old queues
     R.delete("queue:aggregation:initial")
     R.delete("queue:aggregation:groups")
@@ -126,7 +127,7 @@ async def define_aggregation_flow():
     )
 
 
-async def schedule_next_task(queue):
+async def schedule_next_task(queue: str) -> None:
     task_data = R.lpop(queue)
     if task_data:
         task = json.loads(task_data)
@@ -137,7 +138,7 @@ async def schedule_next_task(queue):
 
 
 @router.get("/tasks/participants")
-async def get_phase_participants():
+async def get_phase_participants() -> JSONResponse:
     return JSONResponse(
         content={
             "phase_1_clients": list(R.smembers("clients:registered")),
@@ -147,7 +148,9 @@ async def get_phase_participants():
 
 
 @router.get("/aggregation/phase/{phase_id}/check_for_task")
-async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: int):
+async def check_for_task(
+    check_for_task_request: CheckForTaskRequest, phase_id: int
+) -> Response | dict[str, Any]:
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
 
     if phase_id == 1:
@@ -168,7 +171,7 @@ async def check_for_task(check_for_task_request: CheckForTaskRequest, phase_id: 
 
 
 @router.put("/aggregation/upload")
-async def upload_weights(request: Request):
+async def upload_weights(request: Request) -> Response:
     """
     Endpoint to upload weights for a specific phase.
     """
@@ -199,7 +202,7 @@ async def upload_weights(request: Request):
 
 
 @router.get("/aggregation/download")
-async def download_weights(request: Request):
+async def download_weights(request: Request) -> Response:
     """
     Endpoint to download weights for a specific phase.
     """
@@ -227,7 +230,7 @@ async def download_weights(request: Request):
 
 
 @router.get("/aggregation/phase/{phase_id}/active_tasks")
-async def get_active_tasks(phase_id: int):
+async def get_active_tasks(phase_id: int) -> TaskSnapshot:
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
     if phase_id == 1:
         active_tasks = tasks_phase_1.get_all_tasks()
@@ -237,7 +240,9 @@ async def get_active_tasks(phase_id: int):
 
 
 @router.post("/register", response_model=KeyClientRegistration)
-async def register(registration_data: KeyClientRegistration, request: Request):
+async def register(
+    registration_data: KeyClientRegistration, request: Request
+) -> KeyClientRegistration:
     if not bcrypt.checkpw(
         registration_data.preshared_secret.encode(), HASHED_PRESHARED_SECRET
     ):
@@ -295,7 +300,7 @@ async def register(registration_data: KeyClientRegistration, request: Request):
 @router.post("/aggregation/final/upload")
 async def upload_final_sum(
     final_sum: UploadFile = File(...), client_name: str = Form(...)
-):
+) -> dict[str, str | float]:
     """
     Endpoint to upload the final accumulated sum.
     """
@@ -309,7 +314,7 @@ async def upload_final_sum(
 
 
 @router.get("/aggregation/final/download")
-async def retrieve_final_sum():
+async def retrieve_final_sum() -> StreamingResponse:
     """
     Endpoint to retrieve the final accumulated sum shared by all clients.
     """
@@ -333,7 +338,7 @@ async def retrieve_final_sum():
 
 
 @router.get("/aggregation/final/recipient")
-async def get_final_sum_recipient():
+async def get_final_sum_recipient() -> dict[str, str | None]:
     """
     Endpoint to retrieve the recipient of the final sum.
     """
@@ -342,7 +347,7 @@ async def get_final_sum_recipient():
 
 
 @router.get("/aggregation/phase/1/first_senders")
-async def is_client_first_sender():
+async def is_client_first_sender() -> dict[str, list[str]]:
     """
     Endpoint to check if a client is in the list of first senders.
     """
@@ -351,7 +356,9 @@ async def is_client_first_sender():
 
 
 @router.post("/aggregation/finished")
-async def indicate_finished(indicate_finished_request: CheckForTaskRequest):
+async def indicate_finished(
+    indicate_finished_request: CheckForTaskRequest,
+) -> dict[str, object]:
     """Indicate that a client has finished all processing. When all registered clients
     have indicated completion, trigger a full reset.
     """

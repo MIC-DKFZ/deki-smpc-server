@@ -7,18 +7,18 @@ router = APIRouter()
 
 
 @router.post("/reset")
-async def reset_tasks():
+async def reset_tasks() -> dict[str, str]:
     await reset_all_state()
     return {"message": "All tasks and queues have been reset."}
 
 
 @router.get("/redis/keys")
-async def get_redis_keys():
+async def get_redis_keys() -> list[str]:
     return R.keys("phase:*")
 
 
 @router.get("/tasks")
-async def debug_tasks():
+async def debug_tasks() -> dict[str, list[str]]:
     data = {}
     for key in sorted(R.keys("queue:aggregation:*")):
         data[key] = R.lrange(key, 0, -1)
@@ -26,7 +26,7 @@ async def debug_tasks():
 
 
 @router.get("/redis/queues")
-async def get_redis_queues():
+async def get_redis_queues() -> dict[str, list[str]]:
     queues = {}
     for key in sorted(R.keys("queue:aggregation:*")):
         queues[key] = R.lrange(key, 0, -1)
@@ -34,7 +34,7 @@ async def get_redis_queues():
 
 
 @router.get("/redis/queues/{queue_name}")
-async def get_redis_queue(queue_name: str):
+async def get_redis_queue(queue_name: str) -> dict[str, list[str]]:
     queue = R.lrange(f"queue:aggregation:{queue_name}", 0, -1)
     if not queue:
         raise HTTPException(status_code=404, detail="Queue not found")
@@ -42,7 +42,7 @@ async def get_redis_queue(queue_name: str):
 
 
 @router.get("/registered-participants")
-async def get_registered_participants():
+async def get_registered_participants() -> dict[str, list[str]]:
     """
     Endpoint to get the list of registered participants.
     """
