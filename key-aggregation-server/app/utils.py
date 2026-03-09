@@ -12,6 +12,8 @@ logging.basicConfig(level=logging.INFO)
 
 
 class Task:
+    """Base type for task managers."""
+
     pass  # TODO: Implement the base Task class
 
 
@@ -45,6 +47,7 @@ class ActiveTasks(Task):
     """
 
     def __init__(self) -> None:
+        """Initialize an empty task list protected by a thread lock."""
         self.tasks: list[TaskRecord] = []
         self.lock = Lock()
 
@@ -130,6 +133,7 @@ class ActiveTasks(Task):
 
 class ActiveTasksPhase2(Task):
     def __init__(self) -> None:
+        """Initialize active/pending task storage and dependency tracking."""
         self.tasks: list[TaskRecord] = []  # Active tasks
         self.pending_tasks: list[TaskRecord] = []  # Waiting on dependency
         self.dependency_map: dict[tuple[str, str], tuple[str, str]] = {}
@@ -166,6 +170,7 @@ class ActiveTasksPhase2(Task):
                 logging.info(f"Task added: {task}")
 
     def check_for_task(self, client_name: str) -> TaskAssignment | None:
+        """Return the next upload/download action for a phase 2 client."""
         with self.lock:
             for task in self.tasks:
                 if task["from"] == client_name and not task["upload_done"]:
@@ -183,6 +188,7 @@ class ActiveTasksPhase2(Task):
             return None
 
     def complete_task(self, client_name: str) -> TaskRecord | None:
+        """Mark a phase 2 task step complete and activate newly unblocked tasks."""
         with self.lock:
             for task in list(self.tasks):  # Copy to avoid mutation during iteration
                 if task["from"] == client_name and not task["upload_done"]:
@@ -219,6 +225,7 @@ class ActiveTasksPhase2(Task):
             logging.info(f"Dependency met. Task activated: {task}")
 
     def get_all_tasks(self) -> TaskSnapshot:
+        """Return copies of current active and pending phase 2 tasks."""
         with self.lock:
             return {
                 "active": self.tasks.copy(),
@@ -226,6 +233,7 @@ class ActiveTasksPhase2(Task):
             }
 
     def clear_tasks(self) -> None:
+        """Remove all phase 2 task state and dependencies."""
         with self.lock:
             self.tasks.clear()
             self.pending_tasks.clear()
@@ -269,15 +277,18 @@ class ActiveTasksPhase2(Task):
             self.last_recipient = self.phase_1_groups[0][0]
 
     def get_last_recipient(self) -> str | None:
+        """Return the final recipient expected in phase 2 routing."""
         return self.last_recipient
 
 
 class FileTransfer:
     def __init__(self) -> None:
+        """Initialize in-memory artifact storage protected by an async lock."""
         self._store: Dict[str, Tuple[bytes, str]] = {}
         self._lock = asyncio.Lock()
 
     async def upload_artifact(self, model_id: str, request: Request) -> Response:
+        """Read request bytes and store them under the provided artifact ID."""
         buf = bytearray()
         async for chunk in request.stream():
             if chunk:
@@ -320,7 +331,7 @@ file_transfer_fl = FileTransfer()
 
 
 async def reset_all_state() -> None:
-    """Internal helper to reset"""
+    """Reset queues, registrations, transfers, and in-memory aggregation state."""
     # Clear all tasks and queues
     R.delete("queue:aggregation:initial")
     R.delete("queue:aggregation:groups")

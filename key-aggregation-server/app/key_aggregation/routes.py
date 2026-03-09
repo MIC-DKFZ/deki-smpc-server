@@ -24,6 +24,7 @@ router = APIRouter()
 
 
 async def __secure_shuffle(array: list[str]) -> list[str]:
+    """Return a shuffled copy of the provided client list."""
     array = array[:]  # avoid modifying original list
     n = len(array)
     for i in range(n - 1, 0, -1):
@@ -33,6 +34,7 @@ async def __secure_shuffle(array: list[str]) -> list[str]:
 
 
 async def __form_initial_groups(registered_clients: list[str]) -> dict[int, list[str]]:
+    """Split registered clients into near-even groups for phase 1 aggregation."""
     initial_groups: dict[int, list[str]] = {}
     num_clients = len(registered_clients)
     num_full_groups = num_clients // 3
@@ -56,6 +58,7 @@ async def __form_initial_groups(registered_clients: list[str]) -> dict[int, list
 
 
 async def define_aggregation_flow() -> None:
+    """Build phase 1 and phase 2 aggregation queues and load initial active tasks."""
     # Clear old queues
     R.delete("queue:aggregation:initial")
     R.delete("queue:aggregation:groups")
@@ -128,6 +131,7 @@ async def define_aggregation_flow() -> None:
 
 
 async def schedule_next_task(queue: str) -> None:
+    """Pop and activate the next phase 1 task from a Redis queue."""
     task_data = R.lpop(queue)
     if task_data:
         task = json.loads(task_data)
@@ -139,6 +143,7 @@ async def schedule_next_task(queue: str) -> None:
 
 @router.get("/tasks/participants")
 async def get_phase_participants() -> JSONResponse:
+    """Return current participant lists for phase 1 and phase 2."""
     return JSONResponse(
         content={
             "phase_1_clients": list(R.smembers("clients:registered")),
@@ -151,6 +156,7 @@ async def get_phase_participants() -> JSONResponse:
 async def check_for_task(
     check_for_task_request: CheckForTaskRequest, phase_id: int
 ) -> Response | dict[str, Any]:
+    """Return the pending task for a client in the selected phase, if any."""
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
 
     if phase_id == 1:
@@ -172,9 +178,7 @@ async def check_for_task(
 
 @router.put("/aggregation/upload")
 async def upload_weights(request: Request) -> Response:
-    """
-    Endpoint to upload weights for a specific phase.
-    """
+    """Store uploaded weights for the client's current task and mark upload done."""
 
     phase_id = int(request.headers.get("X-Phase"))
     client_name = request.headers.get("X-Client-Name")
@@ -203,9 +207,7 @@ async def upload_weights(request: Request) -> Response:
 
 @router.get("/aggregation/download")
 async def download_weights(request: Request) -> Response:
-    """
-    Endpoint to download weights for a specific phase.
-    """
+    """Download weights for the client's current task and advance task state."""
 
     phase_id = int(request.headers.get("X-Phase"))
     client_name = request.headers.get("X-Client-Name")
@@ -231,6 +233,7 @@ async def download_weights(request: Request) -> Response:
 
 @router.get("/aggregation/phase/{phase_id}/active_tasks")
 async def get_active_tasks(phase_id: int) -> TaskSnapshot:
+    """Return active and pending tasks for the requested aggregation phase."""
     assert phase_id in [1, 2], "Invalid phase ID. Must be 1 or 2."
     if phase_id == 1:
         active_tasks = tasks_phase_1.get_all_tasks()
@@ -243,6 +246,7 @@ async def get_active_tasks(phase_id: int) -> TaskSnapshot:
 async def register(
     registration_data: KeyClientRegistration, request: Request
 ) -> KeyClientRegistration:
+    """Register a client and trigger aggregation flow when all clients are present."""
     if not bcrypt.checkpw(
         registration_data.preshared_secret.encode(), HASHED_PRESHARED_SECRET
     ):
@@ -301,9 +305,7 @@ async def register(
 async def upload_final_sum(
     final_sum: UploadFile = File(...), client_name: str = Form(...)
 ) -> dict[str, str | float]:
-    """
-    Endpoint to upload the final accumulated sum.
-    """
+    """Persist the final aggregated payload uploaded by a client."""
     start_time = time.time()
     contents = await final_sum.read()
     redis_key = f"final:sum"
@@ -315,9 +317,7 @@ async def upload_final_sum(
 
 @router.get("/aggregation/final/download")
 async def retrieve_final_sum() -> StreamingResponse:
-    """
-    Endpoint to retrieve the final accumulated sum shared by all clients.
-    """
+    """Stream the final aggregated payload to a requesting client."""
     start_time = time.time()
     content = R_BINARY.get(f"final:sum")
 
@@ -339,18 +339,14 @@ async def retrieve_final_sum() -> StreamingResponse:
 
 @router.get("/aggregation/final/recipient")
 async def get_final_sum_recipient() -> dict[str, str | None]:
-    """
-    Endpoint to retrieve the recipient of the final sum.
-    """
+    """Return the client expected to hold or forward the final sum."""
     recipient = tasks_phase_2.get_last_recipient()
     return {"recipient": recipient}
 
 
 @router.get("/aggregation/phase/1/first_senders")
 async def is_client_first_sender() -> dict[str, list[str]]:
-    """
-    Endpoint to check if a client is in the list of first senders.
-    """
+    """Return the list of first senders selected for phase 1 groups."""
     first_senders = json.loads(R.get("phase:1:first_senders") or "[]")
     return {"first_senders": first_senders}
 
@@ -359,9 +355,7 @@ async def is_client_first_sender() -> dict[str, list[str]]:
 async def indicate_finished(
     indicate_finished_request: CheckForTaskRequest,
 ) -> dict[str, object]:
-    """Indicate that a client has finished all processing. When all registered clients
-    have indicated completion, trigger a full reset.
-    """
+    """Mark a client as finished and reset server state when all clients are done."""
     client_name = indicate_finished_request.client_name
     if not R.sismember("clients:registered", client_name):
         raise HTTPException(status_code=400, detail="Client not registered")

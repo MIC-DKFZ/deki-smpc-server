@@ -23,9 +23,7 @@ router = APIRouter()
 
 @router.put("/upload")
 async def upload_model(request: Request) -> Response:
-    """
-    Endpoint to upload the model for secure federated learning.
-    """
+    """Upload one client's model shard and trigger aggregation check."""
 
     client_name = request.headers.get("X-Client-Name")
 
@@ -44,10 +42,7 @@ async def upload_model(request: Request) -> Response:
 
 
 async def aggregate_models_if_ready() -> None:
-    """
-    Aggregate all uploaded models: sum their tensors, store as 'model:final', and delete all model keys from Redis.
-    Handles lz4, gzip, and non-compressed model files robustly.
-    """
+    """Aggregate models when all uploads are present and store the result in memory."""
     intermediate_aggregated_state_dict: Optional[Dict[str, torch.Tensor]] = None
 
     async with file_transfer_fl._lock:
@@ -81,9 +76,7 @@ async def aggregate_models_if_ready() -> None:
 
 @router.get("/download")
 async def retrieve_model() -> FastAPIResponse:
-    """
-    Endpoint to retrieve the final accumulated model.
-    """
+    """Return the aggregated model as a binary download response."""
     async with aggregated_state_dict_lock:
         global aggregated_state_dict
         if aggregated_state_dict is None:
