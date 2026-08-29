@@ -152,7 +152,7 @@ async def get_phase_participants() -> JSONResponse:
     )
 
 
-@router.get("/aggregation/phase/{phase_id}/check_for_task")
+@router.get("/aggregation/phase/{phase_id}/check_for_task", response_model=None)
 async def check_for_task(
     check_for_task_request: CheckForTaskRequest, phase_id: int
 ) -> Response | dict[str, Any]:
