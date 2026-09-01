@@ -1,28 +1,142 @@
+x-server-env: &server-env
+  DEKI_ADMIN_TOKEN: local-development-operator-token-CHANGE-ME
+  DEKI_DATABASE_PATH: /data/metadata.sqlite3
+  DEKI_ARTIFACT_PATH: /data/artifacts
+  DEKI_ROUND_TTL_SECONDS: "300"
+  DEKI_RETENTION_SECONDS: "3600"
+  DEKI_FEDERATIONS_JSON: >-
+    {"local-demo":{"client-1":{"token":"development-client-1-token-CHANGE-ME","signing_public_key":"XSFHB4TWMvnqilpW5OnWFRAWf5bCbI518U0hGtsqY/Q="},"client-2":{"token":"development-client-2-token-CHANGE-ME","signing_public_key":"XuRROejxwQaWsccKPNnaTxvm/Y6xAeTgkbBKgkQUAkw="},"client-3":{"token":"development-client-3-token-CHANGE-ME","signing_public_key":"do05EZ17b+154w9AELTx9E3JeGspJdrbt4l2zshqvlU="}}}
 
-x-defaults: &default-settings
-  HOST: 0.0.0.0
-  NUM_CLIENTS: 4
-  KEEP_MODELS_IN_RAM: "true"
+x-client-env: &client-env
+  DEKI_BASE_URL: http://api:8080
+  DEKI_TRUSTED_SIGNING_KEYS: >-
+    {"client-1":"XSFHB4TWMvnqilpW5OnWFRAWf5bCbI518U0hGtsqY/Q=","client-2":"XuRROejxwQaWsccKPNnaTxvm/Y6xAeTgkbBKgkQUAkw=","client-3":"do05EZ17b+154w9AELTx9E3JeGspJdrbt4l2zshqvlU="}
+
+x-client-service: &client-service
+  build:
+    context: ../deki-smpc
+  profiles: ["e2e"]
+  command: ["/app/examples/container_client.py"]
+  read_only: true
+  tmpfs: ["/tmp"]
+  volumes:
+    - coordination:/coord
+  depends_on:
+    operator:
+      condition: service_completed_successfully
+  restart: "no"
 
 services:
-  key-aggregation-server:
+  init-coordination:
+    image: alpine:3.22.1
+    profiles: ["e2e"]
+    command: ["sh", "-c", "chown 999:999 /coord"]
+    user: "0:0"
+    volumes:
+      - coordination:/coord
+    restart: "no"
+
+  api:
     build: ./key-aggregation-server
+    environment: *server-env
     ports:
-      - "8080:8080"
-    environment:
-      <<: *default-settings
-      PORT: 8080
-      PRESHARED_SECRET: my_secure_presHared_secret_123!
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - protocol-data:/data
+    read_only: true
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
     deploy:
       resources:
-        reservations:
-          devices:
-          - driver: nvidia
-            count: 1
-            capabilities: [gpu]
-  redis:
-    image: redis:latest
-    ports:
-      - "6379:6379"
+        limits:
+          memory: 2G
+          cpus: "2"
+
+  worker:
+    build: ./key-aggregation-server
+    command: ["python", "-m", "app.worker.aggregation"]
+    environment: *server-env
+    healthcheck:
+      disable: true
+    volumes:
+      - protocol-data:/data
+    read_only: true
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2"
+
+  operator:
+    build:
+      context: ../deki-smpc
+    profiles: ["e2e"]
+    command: ["/app/examples/container_operator.py"]
+    environment:
+      DEKI_BASE_URL: http://api:8080
+      DEKI_ADMIN_TOKEN: local-development-operator-token-CHANGE-ME
+    volumes:
+      - coordination:/coord
+    read_only: true
+    tmpfs: ["/tmp"]
+    depends_on:
+      api:
+        condition: service_healthy
+      init-coordination:
+        condition: service_completed_successfully
+    restart: "no"
+
+  client-1:
+    <<: *client-service
+    environment:
+      <<: *client-env
+      DEKI_CLIENT_ID: client-1
+      DEKI_AUTH_TOKEN: development-client-1-token-CHANGE-ME
+      DEKI_IDENTITY_PRIVATE_KEY: yhBskyKiJObUXxI6a5Z28qNDYfJZX8FxsUfyaP4bOVg=
+
+  client-2:
+    <<: *client-service
+    environment:
+      <<: *client-env
+      DEKI_CLIENT_ID: client-2
+      DEKI_AUTH_TOKEN: development-client-2-token-CHANGE-ME
+      DEKI_IDENTITY_PRIVATE_KEY: +puD3VsUYmX4h7lEJjS7q6JvGaKSYzGKz92/KVnE6tE=
+
+  client-3:
+    <<: *client-service
+    environment:
+      <<: *client-env
+      DEKI_CLIENT_ID: client-3
+      DEKI_AUTH_TOKEN: development-client-3-token-CHANGE-ME
+      DEKI_IDENTITY_PRIVATE_KEY: hBWaKfUdx/9hadCFoqnn6ko4h2/MQDA5PS2wUyfi26M=
+
+  verify:
+    build:
+      context: ../deki-smpc
+    profiles: ["e2e"]
+    command: ["/app/examples/container_verify.py"]
+    volumes:
+      - coordination:/coord:ro
+    read_only: true
+    tmpfs: ["/tmp"]
+    depends_on:
+      client-1: {condition: service_completed_successfully}
+      client-2: {condition: service_completed_successfully}
+      client-3: {condition: service_completed_successfully}
+    restart: "no"
+
+volumes:
+  protocol-data:
+  coordination:

@@ -1,43 +1,50 @@
-import logging
+"""Production ASGI entry point."""
 
-import uvicorn
-from app.config import HOST, PORT
-from fastapi import FastAPI
-from key_aggregation.routes import router as key_aggregation_router
-from maintenance.routes import router as maintenance_router
-from secure_fl.routes import router as secure_fl_router
+from __future__ import annotations
 
-logging.basicConfig(level=logging.INFO)
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import cast
 
-if __name__ == "__main__":
+from fastapi import FastAPI, Request
 
-    tags_metadata = [
-        {
-            "name": "Key Aggregation",
-            "description": "Aggregate keys from multiple clients",
-        },
-        {"name": "Maintenance", "description": "Endpoints for maintenance tasks"},
-        {
-            "name": "Federated Learning",
-            "description": "Endpoints related to federated learning tasks",
-        },
-    ]
-    app = FastAPI(
-        root_path="/",
-        title="Key Aggregation Server",
-        description="A server for aggregating keys from multiple clients and performing federated learning.",
+from app.api.v1 import router
+from app.config import Settings
+from app.persistence.database import Database
+from app.storage.filesystem import FilesystemArtifactStore
+
+
+def create_app(settings: Settings) -> FastAPI:
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        database = Database(settings.database_path)
+        database.initialize(settings.federation_config)
+        application.state.settings = settings
+        application.state.database = database
+        application.state.artifact_store = FilesystemArtifactStore(settings.artifact_path, settings.max_artifact_bytes)
+        yield
+
+    application = FastAPI(
+        title="deki-smpc Server",
         version="1.0.0",
-        openapi_tags=tags_metadata,
+        lifespan=lifespan,
         docs_url="/docs",
+        redoc_url=None,
     )
+    application.include_router(router)
 
-    # Include routers for different functionalities
-    app.include_router(
-        key_aggregation_router, prefix="/key-aggregation", tags=["Key Aggregation"]
-    )
-    app.include_router(
-        secure_fl_router, prefix="/secure-fl", tags=["Federated Learning"]
-    )
-    app.include_router(maintenance_router, prefix="/maintenance", tags=["Maintenance"])
+    @application.get("/health/live", include_in_schema=False)
+    def live() -> dict[str, str]:
+        return {"status": "live"}
 
-    uvicorn.run(app, host=HOST, port=PORT)
+    @application.get("/health/ready", include_in_schema=False)
+    def ready(request: Request) -> dict[str, str]:
+        database = cast(Database, request.app.state.database)
+        with database.connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+        return {"status": "ready"}
+
+    return application
+
+
+app = create_app(Settings.from_env())

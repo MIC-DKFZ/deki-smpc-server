@@ -1,0 +1,19 @@
+services:
+  worker:
+    command: ["python", "/app/e2e/tampering_worker.py"]
+    volumes:
+      - protocol-data:/data
+      - ./key-aggregation-server/e2e:/app/e2e:ro
+  operator:
+    environment:
+      DEKI_BASE_URL: http://api:8080
+      DEKI_ADMIN_TOKEN: local-development-operator-token-CHANGE-ME
+      DEKI_ROUND_COUNT: "1"
+  client-1:
+    command: ["/app/examples/container_tamper_client.py"]
+  client-2:
+    command: ["/app/examples/container_tamper_client.py"]
+  client-3:
+    command: ["/app/examples/container_tamper_client.py"]
+  verify:
+    command: ["/app/examples/container_tamper_verify.py"]
