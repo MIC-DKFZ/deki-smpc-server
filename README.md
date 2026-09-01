@@ -1,177 +1,240 @@
-# deki-smpc-server
+<div align="center">
 
-`deki-smpc-server` is the server-side part of the [deki-smpc](https://github.com/MIC-DKFZ/deki-smpc) ecosystem.
-This branch currently provides:
+# deki-smpc Server
 
-- a **Key Aggregation Server** (FastAPI)
-- a **Redis** instance for coordination/state
+### The coordination service for privacy-preserving federated learning
 
-The server exposes APIs for:
-- client registration
-- phased aggregation task orchestration
-- artifact upload/download for secure aggregation
-- final result handoff and reset
+Run secure aggregation rounds, collect masked updates, and publish results that
+every participant can verify.
 
-## Repository Layout
+<a href="https://www.python.org/">
+  <img alt="Python 3.12+" src="https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&amp;logoColor=white">
+</a>
+<a href="https://fastapi.tiangolo.com/">
+  <img alt="FastAPI 0.115+" src="https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&amp;logoColor=white">
+</a>
+<a href="docs/protocol-v1.md">
+  <img alt="Protocol v1" src="https://img.shields.io/badge/protocol-v1-6C63FF">
+</a>
+<a href="LICENSE">
+  <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg">
+</a>
 
-- `key-aggregation-server/app/main.py`: FastAPI app entrypoint
-- `key-aggregation-server/app/key_aggregation/routes.py`: registration + phased aggregation APIs
-- `key-aggregation-server/app/secure_fl/routes.py`: federated model upload/download APIs
-- `key-aggregation-server/app/maintenance/routes.py`: debug and reset APIs
-- `key-aggregation-server/app/utils.py`: task orchestration and artifact transfer helpers
-- `docker-compose.yml`: local stack definition
+</div>
 
-## Architecture at a Glance
+---
 
-1. Clients register with `/key-aggregation/register`.
-2. Server creates phase 1 and phase 2 task queues in Redis.
-3. Clients poll for tasks, then upload/download intermediate artifacts.
-4. Final sum is uploaded/downloaded via dedicated endpoints.
-5. When all clients signal completion, server state is reset.
+`deki-smpc-server` is the service-side half of deki-smpc's secure multi-party
+computation system. It coordinates a fixed group of federated learning
+participants while the companion `deki-smpc` client protects each site's model
+update and verifies the combined result.
 
-## Quickstart
+The server handles the operational work—authentication, round progress,
+durable storage, aggregation jobs, deadlines, and cleanup—without requiring
+access to any participant's individual update in the clear.
 
-1. Clone and enter the repository:
+> The service is a coordinator and calculator, not a trusted holder of private
+> model updates. Clients mask before upload and verify after aggregation.
 
-```bash
-git clone <your-fork-or-origin-url>
-cd deki-smpc-server
+## Overview
+
+A federation operator enrolls the participating organizations once. For each
+training step, the operator opens a round for a specific participant set and
+model schema. deki-smpc then moves every participant through the same short flow:
+
+```mermaid
+sequenceDiagram
+    participant O as Operator
+    participant C as Enrolled clients
+    participant A as deki-smpc API
+    participant W as Aggregation worker
+    O->>A: Create a round
+    C->>A: Join and exchange signed setup material
+    C->>A: Upload masked model updates
+    A->>W: Queue aggregation
+    W->>A: Publish aggregate
+    A-->>C: Return result for client-side verification
 ```
 
-2. Start services:
+The API keeps participants synchronized and persists every state transition.
+The worker adds the masked tensor artifacts; their pairwise masks cancel only
+in the complete sum. Clients independently check the published result before
+using it.
+
+### What the server provides
+
+- **Round coordination** — one authenticated state machine keeps the operator
+  and all committed participants in sync.
+- **Durable execution** — round metadata, immutable model artifacts, jobs, and
+  audit events survive process restarts.
+- **Safe retries** — idempotency keys make repeated requests predictable while
+  leases let workers recover interrupted jobs.
+- **Operational controls** — health endpoints, deadlines, retention cleanup,
+  bounded artifact sizes, and graceful shutdown behavior.
+- **A small deployment footprint** — one FastAPI service, one aggregation
+  worker, and one shared durable volume for the supplied single-host setup.
+
+## Quick start
+
+The included Compose setup starts a local three-participant federation with
+development-only identities and tokens. It binds the API to
+`127.0.0.1:8080`.
 
 ```bash
-docker compose up --build
+docker compose up --build -d api worker
+curl --fail http://127.0.0.1:8080/health/ready
 ```
 
-3. Open API docs:
-
-- Key Aggregation Server: `http://localhost:8080/docs`
-- Redis: `localhost:6379`
-
-4. Basic smoke check:
-
-```bash
-curl -s http://localhost:8080/maintenance/redis/keys
-```
-
-5. Stop services:
+Open <http://127.0.0.1:8080/docs> to explore the API, then stop the services
+with:
 
 ```bash
 docker compose down
 ```
 
-## Configuration
+This local configuration intentionally uses plain HTTP and embedded demo
+credentials. Production deployments require TLS, real secret management, a
+durable volume, and an enrollment manifest controlled by the federation
+operator. See the **[deployment guide](docs/deployment.md)** before exposing a
+service.
 
-Configuration is primarily injected via `docker-compose.yml`.
-Defaults used by the compose stack:
+## Architecture
 
-| Variable | Purpose | Default in compose |
-| --- | --- | --- |
-| `HOST` | Bind address | `0.0.0.0` |
-| `PORT` | API port | `8080` |
-| `NUM_CLIENTS` | Expected participant count | `4` |
-| `PRESHARED_SECRET` | Shared registration secret | `my_secure_presHared_secret_123!` |
-| `REDIS_HOST` | Redis hostname | `redis` |
-| `REDIS_PORT` | Redis port | `6379` |
-
-Note:
-- Application code has internal fallbacks (for example, `NUM_CLIENTS=3`) but compose overrides these during normal local runs.
-
-## API Overview
-
-Base URL: `http://localhost:8080`
-
-### Key Aggregation (`/key-aggregation`)
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/register` | Register a client and trigger workflow when all clients are present |
-| `GET` | `/tasks/participants` | List phase-1 and phase-2 participants |
-| `GET` | `/aggregation/phase/{phase_id}/check_for_task` | Poll for next task (`phase_id` in `1,2`) |
-| `PUT` | `/aggregation/upload` | Upload artifact for current task |
-| `GET` | `/aggregation/download` | Download artifact for current task |
-| `GET` | `/aggregation/phase/{phase_id}/active_tasks` | Inspect active/pending task state |
-| `POST` | `/aggregation/final/upload` | Upload final aggregated sum |
-| `GET` | `/aggregation/final/download` | Download final aggregated sum |
-| `GET` | `/aggregation/final/recipient` | Get final recipient |
-| `GET` | `/aggregation/phase/1/first_senders` | Get selected phase-1 first senders |
-| `POST` | `/aggregation/finished` | Mark a client finished (can trigger reset) |
-
-### Secure FL (`/secure-fl`)
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `PUT` | `/upload` | Upload model payload for secure FL aggregation |
-| `GET` | `/download` | Download aggregated model payload |
-
-### Maintenance (`/maintenance`)
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| `POST` | `/reset` | Reset task queues, state, and cached artifacts |
-| `GET` | `/redis/keys` | Show phase-related Redis keys |
-| `GET` | `/tasks` | Show queue entries used for aggregation |
-| `GET` | `/redis/queues` | Show all aggregation queue contents |
-| `GET` | `/redis/queues/{queue_name}` | Show one queue |
-| `GET` | `/registered-participants` | Show registered clients |
-
-## Request Conventions
-
-Headers used by task-based endpoints:
-
-- `X-Client-Name`: current client identifier
-- `X-Phase`: current phase ID (`1` or `2`) for `/aggregation/upload` and `/aggregation/download`
-
-`POST /key-aggregation/register` expects a JSON body:
-
-```json
-{
-  "ip_address": "127.0.0.1",
-  "client_name": "client-1",
-  "preshared_secret": "my_secure_presHared_secret_123!"
-}
+```mermaid
+flowchart LR
+    O[Federation operator] -->|create / abort rounds| API[FastAPI service]
+    C[Enrolled clients] <-->|setup, masked updates,<br/>verified results| API
+    API <--> DB[(SQLite metadata)]
+    API <--> FS[(Immutable artifacts)]
+    W[Aggregation worker] <--> DB
+    W <--> FS
 ```
 
-`POST /key-aggregation/aggregation/final/upload` is multipart:
+The supplied deployment has two process roles:
 
-- `final_sum`: uploaded file
-- `client_name`: form field
+| Component | Responsibility |
+| --- | --- |
+| **API** | Authenticate requests, validate protocol artifacts, coordinate barriers, and commit state transitions |
+| **Worker** | Aggregate artifacts, publish results, and run maintenance |
 
-## Minimal End-to-End Flow (Manual)
+Both processes share a SQLite database and an fsync-backed artifact directory
+on one durable volume. This design supports one durable host and can run
+multiple API or worker processes on that host. The documented storage
+interfaces define the boundary for a future multi-host backend.
 
-1. Register all clients (`NUM_CLIENTS` times):
+## Deployment at a glance
+
+| | Requirement |
+| --- | --- |
+| Runtime | Python 3.12+ or Docker with Compose v2 |
+| Processes | At least one API and one aggregation worker |
+| Storage | Shared durable volume mounted at `/data` |
+| Authentication | Operator token plus one token and Ed25519 public key per participant |
+| Network | TLS termination at the service ingress |
+| Federation | A fixed set of at least three enrolled participants |
+
+Configuration is provided through environment variables. The most important
+ones are:
+
+| Variable | Purpose |
+| --- | --- |
+| `DEKI_ADMIN_TOKEN` | Authenticates round-management requests |
+| `DEKI_FEDERATIONS_JSON` | Enrolls federations, participant tokens, and public identity keys |
+| `DEKI_DATABASE_PATH` | Selects the SQLite metadata file |
+| `DEKI_ARTIFACT_PATH` | Selects the immutable artifact directory |
+| `DEKI_ROUND_TTL_SECONDS` | Sets the default round deadline |
+| `DEKI_RETENTION_SECONDS` | Controls cleanup of finished rounds |
+
+The [deployment guide](docs/deployment.md) contains the full configuration
+reference, resource-planning guidance, and production topology.
+
+## Client and server
+
+deki-smpc deliberately separates the participant-facing library from the service:
+
+| Repository | For | Responsibility |
+| --- | --- | --- |
+| **`deki-smpc`** | Participating sites | Protect updates and verify results |
+| **`deki-smpc-server`** (this repository) | Service operators | Coordinate rounds and publish aggregates |
+
+Release `1.0.0` of both repositories implements protocol v1 and wire value
+`1.0`. Keep the repositories as siblings when running the full integration
+suite.
+
+## End-to-end demo
+
+With `deki-smpc` and `deki-smpc-server` checked out next to one another, the
+Compose profile runs two API processes, one worker, three independent clients,
+and five consecutive verified rounds:
 
 ```bash
-curl -X POST http://localhost:8080/key-aggregation/register \
-  -H "Content-Type: application/json" \
-  -d '{"ip_address":"127.0.0.1","client_name":"client-1","preshared_secret":"my_secure_presHared_secret_123!"}'
+docker compose --profile e2e -p deki_v1_e2e up --build -d
+test "$(docker wait deki_v1_e2e-verify-1)" = "0"
+docker compose --profile e2e -p deki_v1_e2e logs verify
+docker compose --profile e2e -p deki_v1_e2e down --volumes --remove-orphans
 ```
 
-2. Poll task assignment for phase 1:
+<details>
+<summary>Run the aggregate-modification scenario</summary>
+
+This adversarial check changes the published result while keeping the artifact
+structurally valid. It succeeds only after all three clients reject the
+modified aggregate.
 
 ```bash
-curl -X GET "http://localhost:8080/key-aggregation/aggregation/phase/1/check_for_task" \
-  -H "Content-Type: application/json" \
-  -d '{"client_name":"client-1"}'
+docker compose -f docker-compose.yml -f docker-compose.tamper.yml \
+  --profile e2e -p deki_v1_tamper up --build -d
+test "$(docker wait deki_v1_tamper-verify-1)" = "0"
+docker compose -f docker-compose.yml -f docker-compose.tamper.yml \
+  --profile e2e -p deki_v1_tamper down --volumes --remove-orphans
 ```
 
-3. Upload/download according to assigned action:
-- upload: `PUT /key-aggregation/aggregation/upload` with headers `X-Client-Name` and `X-Phase`
-- download: `GET /key-aggregation/aggregation/download` with same headers
+</details>
 
-4. After final sum upload/download, mark completion:
+For a more approachable training example, start with the client repository's
+`docs/getting-started-mnist.md` walkthrough. It covers federation setup, three
+local training sites, round creation, and aggregation from beginning to end.
+
+## Documentation
+
+- **[Deployment](docs/deployment.md)** — topology, configuration, TLS, storage,
+  and resource planning
+- **[Operations](docs/operations.md)** — health, recovery, retention, and audit
+  workflows
+- **[API v1](docs/api-v1.md)** — operator and participant endpoints
+- **[Protocol responsibilities](docs/protocol-v1.md)** — the server's role in
+  each protocol phase
+- **[Architecture decision record](docs/adr/0001-durable-rounds.md)** — durable
+  round orchestration and storage boundaries
+- **[Changelog](CHANGELOG.md)** — releases and notable changes
+
+The full cryptographic protocol, wire format, and security model live in the
+companion `deki-smpc` repository.
+
+## Security boundary
+
+The aggregation service is treated as untrusted for individual model
+confidentiality and aggregate integrity. It sees request metadata, masked
+participant artifacts, and the final authorized aggregate; it does not receive
+the individual clear updates. Clients reject malformed or modified results.
+
+deki-smpc v1 requires every committed participant to finish a round. Dropout causes
+expiry or operator abort, and protection against malicious participant inputs
+remains an application and federation-governance responsibility.
+
+## Development
+
+Install both sibling repositories and run the local quality gate:
 
 ```bash
-curl -X POST http://localhost:8080/key-aggregation/aggregation/finished \
-  -H "Content-Type: application/json" \
-  -d '{"client_name":"client-1"}'
+python -m pip install -e ../deki-smpc
+python -m pip install -e '.[test]'
+pre-commit run --all-files
+ruff check key-aggregation-server
+mypy
+python -m pytest -q
 ```
 
-## Operational Notes
+## License
 
-- State is intentionally ephemeral:
-  - task queues and coordination live in Redis
-  - uploaded artifacts are held in in-memory server buffers
-- `/maintenance/reset` and automatic reset-on-finished are designed for test/dev workflows.
-- Replace the default `PRESHARED_SECRET` before non-local deployments.
+deki-smpc Server is distributed under the terms of the [MIT License](LICENSE).
