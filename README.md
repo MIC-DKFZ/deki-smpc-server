@@ -29,8 +29,8 @@ computation system. It coordinates a fixed group of federated learning
 participants while the companion `deki-smpc` client protects each site's model
 update and verifies the combined result.
 
-The server handles the operational work—authentication, round progress,
-durable storage, aggregation jobs, deadlines, and cleanup—without requiring
+The server handles the operational work, including authentication, round
+progress, durable storage, aggregation jobs, deadlines, and cleanup, without requiring
 access to any participant's individual update in the clear.
 
 > The service is a coordinator and calculator, not a trusted holder of private
@@ -62,15 +62,15 @@ unmask, and verify locally.
 
 ### What the server provides
 
-- **Round coordination** — one authenticated state machine keeps the operator
+- **Round coordination:** one authenticated state machine keeps the operator
   and all committed participants in sync.
-- **Durable execution** — round metadata, immutable model artifacts, jobs, and
+- **Durable execution:** round metadata, immutable model artifacts, jobs, and
   audit events survive process restarts.
-- **Safe retries** — idempotency keys make repeated requests predictable while
+- **Safe retries:** idempotency keys make repeated requests predictable while
   leases let workers recover interrupted jobs.
-- **Operational controls** — health endpoints, deadlines, retention cleanup,
+- **Operational controls:** health endpoints, deadlines, retention cleanup,
   bounded artifact sizes, and graceful shutdown behavior.
-- **A small deployment footprint** — one FastAPI service, one aggregation
+- **A small deployment footprint:** one FastAPI service, one aggregation
   worker, and one shared durable volume for the supplied single-host setup.
 
 ## Quick start
@@ -206,15 +206,15 @@ local training sites, round creation, and aggregation from beginning to end.
 
 ## Documentation
 
-- **[Deployment](docs/deployment.md)** — topology, configuration, TLS, storage,
+- **[Deployment](docs/deployment.md):** topology, configuration, TLS, storage,
   and resource planning
-- **[Operations](docs/operations.md)** — health, recovery, retention, and audit
+- **[Operations](docs/operations.md):** health, recovery, retention, and audit
   workflows
-- **[API v1](docs/api-v1.md)** — operator and participant endpoints
-- **[Protocol 1.1 responsibilities](docs/protocol-v1.1.md)** — durable group and tree coordination
-- **[Architecture decision record](docs/adr/0001-durable-rounds.md)** — durable
+- **[API v1](docs/api-v1.md):** operator and participant endpoints
+- **[Protocol 1.1 responsibilities](docs/protocol-v1.1.md):** durable group and tree coordination
+- **[Architecture decision record](docs/adr/0001-durable-rounds.md):** durable
   round orchestration and storage boundaries
-- **[Changelog](CHANGELOG.md)** — releases and notable changes
+- **[Changelog](CHANGELOG.md):** releases and notable changes
 
 The full cryptographic protocol, wire format, and security model live in the
 companion `deki-smpc` repository.
