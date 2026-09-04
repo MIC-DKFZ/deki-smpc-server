@@ -13,8 +13,8 @@ every participant can verify.
 <a href="https://fastapi.tiangolo.com/">
   <img alt="FastAPI 0.115+" src="https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&amp;logoColor=white">
 </a>
-<a href="docs/protocol-v1.md">
-  <img alt="Protocol v1" src="https://img.shields.io/badge/protocol-v1-6C63FF">
+<a href="docs/protocol-v1.1.md">
+  <img alt="Protocol 1.1" src="https://img.shields.io/badge/protocol-1.1-6C63FF">
 </a>
 <a href="LICENSE">
   <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg">
@@ -58,8 +58,7 @@ The API keeps participants synchronized and persists every state transition.
 Under default protocol `1.1`, clients aggregate model keys through parallel
 groups and a binary tree. The worker adds masked tensor artifacts, but their
 aggregate remains masked from the service; clients decrypt the final key,
-unmask, and verify locally. Explicit legacy `1.0` rounds retain pairwise masks
-and reveal the final aggregate to the service.
+unmask, and verify locally.
 
 ### What the server provides
 
@@ -157,9 +156,9 @@ deki-smpc deliberately separates the participant-facing library from the service
 | **`deki-smpc`** | Participating sites | Protect updates and verify results |
 | **`deki-smpc-server`** (this repository) | Service operators | Coordinate rounds and publish aggregates |
 
-Release `1.0.1` of both repositories supports wire values `1.0` and `1.1`; new
-rounds default to `1.1`. Keep the repositories as siblings when running the
-full integration suite.
+Release `1.0.1` of both repositories defaults new rounds to wire protocol
+`1.1`. Keep the repositories as siblings when running the full integration
+suite.
 
 ## End-to-end demo
 
@@ -212,8 +211,6 @@ local training sites, round creation, and aggregation from beginning to end.
 - **[Operations](docs/operations.md)** — health, recovery, retention, and audit
   workflows
 - **[API v1](docs/api-v1.md)** — operator and participant endpoints
-- **[Protocol responsibilities](docs/protocol-v1.md)** — the server's role in
-  each protocol phase
 - **[Protocol 1.1 responsibilities](docs/protocol-v1.1.md)** — durable group and tree coordination
 - **[Architecture decision record](docs/adr/0001-durable-rounds.md)** — durable
   round orchestration and storage boundaries
@@ -226,8 +223,8 @@ companion `deki-smpc` repository.
 
 The aggregation service is treated as untrusted for individual model
 confidentiality and aggregate integrity. It sees request metadata and masked
-participant artifacts. Protocol `1.1` also hides the final clear aggregate;
-legacy `1.0` does not. Clients reject malformed or modified results.
+participant artifacts. Protocol `1.1` also hides the final clear aggregate.
+Clients reject malformed or modified results.
 
 deki-smpc v1 requires every committed participant to finish a round. Dropout causes
 expiry or operator abort, and protection against malicious participant inputs
