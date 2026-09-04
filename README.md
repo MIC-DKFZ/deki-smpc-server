@@ -44,14 +44,10 @@ model schema. deki-smpc then moves every participant through the same short flow
 
 ```mermaid
 flowchart LR
-    G1[blinded group 1] --> T[binary key tree]
-    G2[blinded group 2] --> T
-    G3[blinded group 3] --> T
-    T --> K[group-encrypted final key]
-    C[enrolled clients] -->|masked updates| W[aggregation worker]
-    W -->|still-masked result| C
-    K --> C
-    API[API + durable task graph] -. coordinates .-> G1 & G2 & G3 & T & C
+    P[Participants] -->|masked updates| S[Server aggregation]
+    P --> K[Binary key tree]
+    S --> V[Local unmask and verification]
+    K --> V
 ```
 
 The API keeps participants synchronized and persists every state transition.
