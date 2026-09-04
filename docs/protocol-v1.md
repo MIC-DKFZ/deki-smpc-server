@@ -1,7 +1,7 @@
 # Protocol v1 server responsibilities
 
-This document defines the server role in deki-smpc v1. Package release `1.0.0`
-uses protocol wire value `1.0`.
+This document defines the legacy server path for wire value `1.0`, preserved in
+package release 1.0.1. New rounds default to [protocol 1.1](protocol-v1.1.md).
 
 ## Round authority
 

@@ -36,7 +36,7 @@ Idempotency-Key: <key>
 
 ```json
 {
-  "protocol_version": "1.0",
+  "protocol_version": "1.1",
   "model_schema": {
     "aggregation_policy": "EQUAL_WEIGHTED",
     "entries": [
@@ -97,6 +97,26 @@ ciphertext, with one signature over the complete message map.
 
 A pending incoming bundle response uses HTTP 204 and `Retry-After: 1`.
 
+## Protocol 1.1 key aggregation
+
+Protocol `1.1` adds these authenticated resources between key setup and update
+upload:
+
+| Method | Resource | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/rounds/{round_id}/tree-plan` | Canonical plan, hash, and signed ephemeral manifest |
+| `GET` | `/v1/rounds/{round_id}/key-actions/next` | Caller-authorized ready task, final action, or HTTP 204 |
+| `PUT` | `/v1/rounds/{round_id}/key-tasks/{task_id}/artifact` | Immutable encrypted task output |
+| `GET` | `/v1/rounds/{round_id}/key-tasks/{task_id}/artifact` | Completed dependency for its authorized receiver |
+| `POST` | `/v1/rounds/{round_id}/key-tasks/{task_id}/ack` | Complete the task and atomically activate dependents |
+| `PUT/GET` | `/v1/rounds/{round_id}/final-key` | Publish or retrieve the group-encrypted aggregate key |
+| `POST` | `/v1/rounds/{round_id}/final-key/ack` | Complete the final-key receipt barrier |
+
+Encrypted uploads use `application/octet-stream`, `X-Artifact-Metadata`, and
+`X-Artifact-Signature`; downloads add `X-Content-SHA256`. Every PUT and POST
+requires a stable idempotency key. See the client wire-1.1 specification for
+the canonical AEAD and signature value.
+
 ## Upload an update
 
 ```http
@@ -108,6 +128,7 @@ Idempotency-Key: <key>
 ```
 
 The body contains the masked signed int64 tensors selected by `MEAN` or `SUM`.
+For `1.1`, their sum remains masked on the server.
 The integrity tag is a big-endian field element in `2**127 - 1`. The server
 streams the body under `DEKI_MAX_ARTIFACT_BYTES` and validates it against the
 committed schema.

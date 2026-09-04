@@ -26,7 +26,7 @@ def create_app(settings: Settings) -> FastAPI:
 
     application = FastAPI(
         title="deki-smpc Server",
-        version="1.0.0",
+        version="1.0.1",
         lifespan=lifespan,
         docs_url="/docs",
         redoc_url=None,

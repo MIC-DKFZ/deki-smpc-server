@@ -121,8 +121,21 @@ rounds.
 
 Disk capacity covers participant updates, one result, SQLite metadata, and
 temporary streaming files for all concurrent rounds within the retention
-window. Set the retention interval from storage capacity and audit
-requirements.
+window. Protocol `1.1` also retains one encrypted model-sized artifact per
+group-ring and tree task plus one final-key artifact. For `n` participants and
+`g = ceil(n/4)` groups (except the five-site case), budget roughly
+`n + 2g` encrypted key artifacts (including final distribution) in addition to
+updates and result. Set the
+retention interval from storage capacity and audit requirements.
+
+## Rolling deployment
+
+Deploy server 1.0.1 first while operators explicitly create `1.0` rounds.
+Active `1.0` rounds retain their direct setup-to-update transition across the
+deployment. Upgrade every participant client next, validate both protocol
+values, then omit `protocol_version` or request `1.1` to enable the new default.
+Rollback must not remove the additive 1.1 SQLite tables while 1.1 rounds or
+their retention records exist.
 
 ## Health checks
 

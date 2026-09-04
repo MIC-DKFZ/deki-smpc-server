@@ -57,7 +57,7 @@ class ModelSchema(StrictModel):
 
 
 class CreateRoundRequest(StrictModel):
-    protocol_version: str = "1.0"
+    protocol_version: str = "1.1"
     model_schema: ModelSchema
     model_schema_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     participants: list[Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")]] = Field(min_length=3)
@@ -85,3 +85,11 @@ class KeyCompleteRequest(StrictModel):
 
 class AbortRequest(StrictModel):
     reason: str = Field(default="OPERATOR_ABORT", min_length=1, max_length=128)
+
+
+class ArtifactReceipt(StrictModel):
+    artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class FinalKeyReceipt(StrictModel):
+    artifact_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
