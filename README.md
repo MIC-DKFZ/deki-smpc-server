@@ -43,23 +43,23 @@ training step, the operator opens a round for a specific participant set and
 model schema. deki-smpc then moves every participant through the same short flow:
 
 ```mermaid
-sequenceDiagram
-    participant O as Operator
-    participant C as Enrolled clients
-    participant A as deki-smpc API
-    participant W as Aggregation worker
-    O->>A: Create a round
-    C->>A: Join and exchange signed setup material
-    C->>A: Upload masked model updates
-    A->>W: Queue aggregation
-    W->>A: Publish aggregate
-    A-->>C: Return result for client-side verification
+flowchart LR
+    G1[blinded group 1] --> T[binary key tree]
+    G2[blinded group 2] --> T
+    G3[blinded group 3] --> T
+    T --> K[group-encrypted final key]
+    C[enrolled clients] -->|masked updates| W[aggregation worker]
+    W -->|still-masked result| C
+    K --> C
+    API[API + durable task graph] -. coordinates .-> G1 & G2 & G3 & T & C
 ```
 
 The API keeps participants synchronized and persists every state transition.
-The worker adds the masked tensor artifacts; their pairwise masks cancel only
-in the complete sum. Clients independently check the published result before
-using it.
+Under default protocol `1.1`, clients aggregate model keys through parallel
+groups and a binary tree. The worker adds masked tensor artifacts, but their
+aggregate remains masked from the service; clients decrypt the final key,
+unmask, and verify locally. Explicit legacy `1.0` rounds retain pairwise masks
+and reveal the final aggregate to the service.
 
 ### What the server provides
 
@@ -157,9 +157,9 @@ deki-smpc deliberately separates the participant-facing library from the service
 | **`deki-smpc`** | Participating sites | Protect updates and verify results |
 | **`deki-smpc-server`** (this repository) | Service operators | Coordinate rounds and publish aggregates |
 
-Release `1.0.0` of both repositories implements protocol v1 and wire value
-`1.0`. Keep the repositories as siblings when running the full integration
-suite.
+Release `1.0.1` of both repositories supports wire values `1.0` and `1.1`; new
+rounds default to `1.1`. Keep the repositories as siblings when running the
+full integration suite.
 
 ## End-to-end demo
 
@@ -191,6 +191,16 @@ docker compose -f docker-compose.yml -f docker-compose.tamper.yml \
 
 </details>
 
+The encrypted-tree tamper scenario is:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.tree-tamper.yml \
+  --profile e2e -p deki_v11_tree_tamper up --build -d
+test "$(docker wait deki_v11_tree_tamper-verify-1)" = "0"
+docker compose -f docker-compose.yml -f docker-compose.tree-tamper.yml \
+  --profile e2e -p deki_v11_tree_tamper down --volumes --remove-orphans
+```
+
 For a more approachable training example, start with the client repository's
 `docs/getting-started-mnist.md` walkthrough. It covers federation setup, three
 local training sites, round creation, and aggregation from beginning to end.
@@ -204,6 +214,7 @@ local training sites, round creation, and aggregation from beginning to end.
 - **[API v1](docs/api-v1.md)** — operator and participant endpoints
 - **[Protocol responsibilities](docs/protocol-v1.md)** — the server's role in
   each protocol phase
+- **[Protocol 1.1 responsibilities](docs/protocol-v1.1.md)** — durable group and tree coordination
 - **[Architecture decision record](docs/adr/0001-durable-rounds.md)** — durable
   round orchestration and storage boundaries
 - **[Changelog](CHANGELOG.md)** — releases and notable changes
@@ -214,9 +225,9 @@ companion `deki-smpc` repository.
 ## Security boundary
 
 The aggregation service is treated as untrusted for individual model
-confidentiality and aggregate integrity. It sees request metadata, masked
-participant artifacts, and the final authorized aggregate; it does not receive
-the individual clear updates. Clients reject malformed or modified results.
+confidentiality and aggregate integrity. It sees request metadata and masked
+participant artifacts. Protocol `1.1` also hides the final clear aggregate;
+legacy `1.0` does not. Clients reject malformed or modified results.
 
 deki-smpc v1 requires every committed participant to finish a round. Dropout causes
 expiry or operator abort, and protection against malicious participant inputs

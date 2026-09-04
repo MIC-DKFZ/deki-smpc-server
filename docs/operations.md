@@ -34,6 +34,13 @@ Round identifiers and state changes form the operational correlation keys.
 Participant clients expose stable exception types and the associated
 `round_id`.
 
+Protocol `1.1` adds the `KEY_AGGREGATION` active state. Its audit trail includes
+`TREE_PLAN_COMMITTED`, `TREE_ARTIFACT_ACCEPTED`, `TREE_TASK_COMPLETED`,
+`FINAL_KEY_PUBLISHED`, `FINAL_KEY_ACKNOWLEDGED`, and `FINAL_KEY_BARRIER`.
+Restarted API processes resume from durable task and receipt rows; operators do
+not manually advance tasks. A rejected or missing contribution requires a new
+round because the protocol intentionally has no dropout recovery.
+
 ## Worker leases
 
 The worker claims each aggregation job with a unique token and an expiry time.

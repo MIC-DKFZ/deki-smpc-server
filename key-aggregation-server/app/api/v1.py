@@ -15,7 +15,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from safetensors import safe_open
 
 from app.domain.errors import api_error
-from app.domain.models import AbortRequest, CreateRoundRequest, KeyBundleArtifact, KeyCompleteRequest, PublicKeyArtifact
+from app.domain.models import (
+    AbortRequest,
+    ArtifactReceipt,
+    CreateRoundRequest,
+    FinalKeyReceipt,
+    KeyBundleArtifact,
+    KeyCompleteRequest,
+    PublicKeyArtifact,
+)
 from app.domain.states import RoundState
 from app.persistence.database import Database, canonical_json
 from app.storage.filesystem import FilesystemArtifactStore
@@ -120,8 +128,8 @@ def create_round(
     idem_key: Annotated[str, Depends(_idem)],
 ) -> dict[str, object]:
     database = _database(request)
-    if body.protocol_version != "1.0":
-        raise api_error(422, "PROTOCOL_VERSION_UNSUPPORTED", "only protocol 1.0 is supported")
+    if body.protocol_version not in {"1.0", "1.1"}:
+        raise api_error(422, "PROTOCOL_VERSION_UNSUPPORTED", "supported protocols are 1.0 and 1.1")
     max_participants = request.app.state.settings.max_participants
     if max_participants is not None and len(body.participants) > max_participants:
         raise api_error(
@@ -311,6 +319,352 @@ def key_setup_complete(
         return database.key_complete(round_id, str(member["client_id"]), body.context_commitment, idem_key, digest)
     except ValueError as exc:
         _translate(exc, round_id)
+
+
+def _artifact_value(
+    task: dict[str, object], plan_hash: str, schema_hash: str, nonce: str, digest: str, size: int
+) -> dict[str, object]:
+    return {
+        "task_id": task["task_id"],
+        "action": task["action"],
+        "stage": task["stage"],
+        "level": task["level"],
+        "sender": task["sender"],
+        "receiver": task["receiver"],
+        "dependencies": task["dependencies"],
+        "plan_hash": plan_hash,
+        "model_schema_hash": schema_hash,
+        "nonce": nonce,
+        "ciphertext_digest": digest,
+        "ciphertext_size": size,
+    }
+
+
+def _final_key_value(
+    row: dict[str, object], plan_hash: str, root: str, nonce: str, digest: str, size: int
+) -> dict[str, object]:
+    return {
+        "task_id": "final-key",
+        "stage": "FINAL_DISTRIBUTION",
+        "level": -1,
+        "sender": root,
+        "receiver": "ALL_PARTICIPANTS",
+        "dependencies": [],
+        "round_id": row["round_id"],
+        "plan_hash": plan_hash,
+        "model_schema_hash": row["model_schema_hash"],
+        "nonce": nonce,
+        "ciphertext_digest": digest,
+        "ciphertext_size": size,
+    }
+
+
+def _decode_metadata(encoded: str | None, round_id: str) -> dict[str, object]:
+    try:
+        if encoded is None:
+            raise ValueError
+        value = json.loads(base64.b64decode(encoded, validate=True))
+        if not isinstance(value, dict):
+            raise TypeError
+        return cast(dict[str, object], value)
+    except Exception as exc:
+        raise api_error(422, "ARTIFACT_INVALID", "encrypted artifact metadata is malformed", round_id) from exc
+
+
+def _ciphertext_digest(path: str, nonce: bytes) -> str:
+    digest = hashlib.sha256(nonce)
+    trailing = b""
+    size = 0
+    with open(path, "rb") as artifact:
+        while chunk := artifact.read(1024 * 1024):
+            size += len(chunk)
+            combined = trailing + chunk
+            if len(combined) > 16:
+                digest.update(combined[:-16])
+                trailing = combined[-16:]
+            else:
+                trailing = combined
+    if size < 16:
+        raise ValueError("ciphertext is too short")
+    return digest.hexdigest()
+
+
+def _file_digest(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as artifact:
+        while chunk := artifact.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fail_tree(database: Database, round_id: str, client_id: str, message: str) -> NoReturn:
+    database.fail_round(round_id, client_id, "KEY_ARTIFACT_REJECTED", message)
+    raise api_error(422, "ROUND_FAILED", "encrypted key artifact was rejected", round_id)
+
+
+@router.get("/rounds/{round_id}/tree-plan")
+def get_tree_plan(
+    round_id: str, request: Request, member: Annotated[dict[str, object], Depends(participant_identity)]
+) -> dict[str, object]:
+    database = _database(request)
+    row = _round_for_member(database, round_id, member)
+    if row["protocol_version"] != "1.1":
+        raise api_error(409, "ROUND_CONFLICT", "tree plans are only available for protocol 1.1", round_id)
+    plan = database.tree_plan(round_id)
+    if not plan:
+        raise api_error(409, "ROUND_CONFLICT", "tree plan is not ready", round_id)
+    return plan
+
+
+@router.get("/rounds/{round_id}/key-actions/next")
+def get_next_key_action(
+    round_id: str, request: Request, member: Annotated[dict[str, object], Depends(participant_identity)]
+) -> Response:
+    database = _database(request)
+    _round_for_member(database, round_id, member)
+    try:
+        action = database.next_key_action(round_id, str(member["client_id"]))
+    except ValueError as exc:
+        _translate(exc, round_id)
+    if action is None:
+        return Response(status_code=204, headers={"Retry-After": "1"})
+    return JSONResponse(action)
+
+
+@router.put("/rounds/{round_id}/key-tasks/{task_id}/artifact")
+async def put_key_task_artifact(
+    round_id: str,
+    task_id: str,
+    request: Request,
+    member: Annotated[dict[str, object], Depends(participant_identity)],
+    idem_key: Annotated[str, Depends(_idem)],
+    encoded_metadata: Annotated[str | None, Header(alias="X-Artifact-Metadata")] = None,
+    signature: Annotated[str | None, Header(alias="X-Artifact-Signature")] = None,
+) -> dict[str, object]:
+    database, store = _database(request), _store(request)
+    row = _round_for_member(database, round_id, member)
+    client_id = str(member["client_id"])
+    try:
+        metadata = _decode_metadata(encoded_metadata, round_id)
+    except Exception:  # noqa: BLE001 - malformed metadata is a protocol failure
+        _fail_tree(database, round_id, client_id, "tree artifact metadata is malformed")
+    plan_record = database.tree_plan(round_id)
+    if row["protocol_version"] != "1.1" or not plan_record:
+        _fail_tree(database, round_id, client_id, "tree task is unavailable")
+    plan = cast(dict[str, Any], plan_record["plan"])
+    task = next((item for item in plan["tasks"] if item["task_id"] == task_id), None)
+    if task is None or task["sender"] != client_id or signature is None:
+        _fail_tree(database, round_id, client_id, "tree task actor or identifier is invalid")
+    stored = None
+    try:
+        stored = await store.put_stream(request.stream())
+        nonce = base64.b64decode(str(metadata.get("nonce")), validate=True)
+        ciphertext_digest = _ciphertext_digest(stored.path, nonce)
+        expected = _artifact_value(
+            task,
+            str(plan_record["plan_hash"]),
+            str(row["model_schema_hash"]),
+            str(metadata.get("nonce")),
+            ciphertext_digest,
+            stored.size,
+        )
+        if len(nonce) != 12 or metadata != expected:
+            raise ValueError("artifact metadata differs from the authorized task")
+        _verify_signature(row, member, "tree-artifact", expected, signature)
+        request_digest = hashlib.sha256(
+            canonical_json({"metadata": expected, "signature": signature, "content": stored.digest}).encode()
+        ).hexdigest()
+        response, replay = database.record_task_artifact(
+            round_id,
+            client_id,
+            task_id,
+            stored,
+            ciphertext_digest,
+            str(metadata["nonce"]),
+            signature,
+            idem_key,
+            request_digest,
+        )
+    except Exception as exc:  # noqa: BLE001 - rejected encrypted tasks durably fail the round
+        if stored is not None:
+            store.delete(stored.path)
+        _fail_tree(database, round_id, client_id, str(exc))
+    if replay:
+        store.delete(stored.path)
+    response["idempotent_replay"] = replay
+    return response
+
+
+@router.get("/rounds/{round_id}/key-tasks/{task_id}/artifact")
+def get_key_task_artifact(
+    round_id: str,
+    task_id: str,
+    request: Request,
+    member: Annotated[dict[str, object], Depends(participant_identity)],
+) -> Response:
+    database = _database(request)
+    _round_for_member(database, round_id, member)
+    try:
+        artifact, metadata = database.task_artifact(round_id, task_id, str(member["client_id"]))
+    except ValueError as exc:
+        _translate(exc, round_id)
+    try:
+        stored_digest = _file_digest(str(artifact["path"]))
+    except OSError:
+        _fail_tree(database, round_id, str(member["client_id"]), "stored tree artifact is unavailable")
+    if not hmac.compare_digest(stored_digest, str(artifact["digest"])):
+        _fail_tree(database, round_id, str(member["client_id"]), "stored tree artifact digest changed")
+    signature = str(metadata.pop("signature"))
+    encoded = base64.b64encode(canonical_json(metadata).encode()).decode()
+    return FileResponse(
+        str(artifact["path"]),
+        media_type="application/octet-stream",
+        headers={
+            "X-Artifact-Metadata": encoded,
+            "X-Artifact-Signature": signature,
+            "X-Content-SHA256": str(artifact["digest"]),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/rounds/{round_id}/key-tasks/{task_id}/ack")
+def acknowledge_key_task(
+    round_id: str,
+    task_id: str,
+    body: ArtifactReceipt,
+    request: Request,
+    member: Annotated[dict[str, object], Depends(participant_identity)],
+    idem_key: Annotated[str, Depends(_idem)],
+) -> dict[str, object]:
+    database = _database(request)
+    _round_for_member(database, round_id, member)
+    payload = body.model_dump(mode="json")
+    digest = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+    try:
+        return database.acknowledge_task(
+            round_id, str(member["client_id"]), task_id, body.artifact_digest, idem_key, digest
+        )
+    except ValueError as exc:
+        _fail_tree(database, round_id, str(member["client_id"]), str(exc))
+
+
+@router.put("/rounds/{round_id}/final-key")
+async def put_final_key(
+    round_id: str,
+    request: Request,
+    member: Annotated[dict[str, object], Depends(participant_identity)],
+    idem_key: Annotated[str, Depends(_idem)],
+    encoded_metadata: Annotated[str | None, Header(alias="X-Artifact-Metadata")] = None,
+    signature: Annotated[str | None, Header(alias="X-Artifact-Signature")] = None,
+) -> dict[str, object]:
+    database, store = _database(request), _store(request)
+    row = _round_for_member(database, round_id, member)
+    client_id = str(member["client_id"])
+    try:
+        metadata = _decode_metadata(encoded_metadata, round_id)
+    except Exception:  # noqa: BLE001 - malformed metadata is a protocol failure
+        _fail_tree(database, round_id, client_id, "final key metadata is malformed")
+    plan_record = database.tree_plan(round_id)
+    if not plan_record or signature is None:
+        _fail_tree(database, round_id, client_id, "final key metadata is unavailable")
+    root = str(cast(dict[str, Any], plan_record["plan"])["root_client_id"])
+    if client_id != root:
+        _fail_tree(database, round_id, client_id, "only the tree root may publish the final key")
+    stored = None
+    try:
+        stored = await store.put_stream(request.stream())
+        nonce = base64.b64decode(str(metadata.get("nonce")), validate=True)
+        ciphertext_digest = _ciphertext_digest(stored.path, nonce)
+        expected = _final_key_value(
+            row,
+            str(plan_record["plan_hash"]),
+            root,
+            str(metadata.get("nonce")),
+            ciphertext_digest,
+            stored.size,
+        )
+        if len(nonce) != 12 or metadata != expected:
+            raise ValueError("final key metadata differs from the authorized action")
+        _verify_signature(row, member, "final-key", expected, signature)
+        request_digest = hashlib.sha256(
+            canonical_json({"metadata": expected, "signature": signature, "content": stored.digest}).encode()
+        ).hexdigest()
+        response, replay = database.record_final_key(
+            round_id,
+            client_id,
+            stored,
+            ciphertext_digest,
+            str(metadata["nonce"]),
+            signature,
+            idem_key,
+            request_digest,
+        )
+    except Exception as exc:  # noqa: BLE001 - rejected final keys durably fail the round
+        if stored is not None:
+            store.delete(stored.path)
+        _fail_tree(database, round_id, client_id, str(exc))
+    if replay:
+        store.delete(stored.path)
+    response["idempotent_replay"] = replay
+    return response
+
+
+@router.get("/rounds/{round_id}/final-key")
+def get_final_key(
+    round_id: str, request: Request, member: Annotated[dict[str, object], Depends(participant_identity)]
+) -> Response:
+    database = _database(request)
+    row = _round_for_member(database, round_id, member)
+    final = database.final_key(round_id)
+    if not final:
+        raise api_error(409, "ROUND_CONFLICT", "final key is not ready", round_id)
+    artifact, metadata = final
+    try:
+        stored_digest = _file_digest(str(artifact["path"]))
+    except OSError:
+        _fail_tree(database, round_id, str(member["client_id"]), "stored final key is unavailable")
+    if not hmac.compare_digest(stored_digest, str(artifact["digest"])):
+        _fail_tree(database, round_id, str(member["client_id"]), "stored final key digest changed")
+    value = _final_key_value(
+        row,
+        str(metadata["plan_hash"]),
+        str(metadata["sender"]),
+        str(metadata["nonce"]),
+        str(metadata["ciphertext_digest"]),
+        int(str(metadata["ciphertext_size"])),
+    )
+    encoded = base64.b64encode(canonical_json(value).encode()).decode()
+    return FileResponse(
+        str(artifact["path"]),
+        media_type="application/octet-stream",
+        headers={
+            "X-Artifact-Metadata": encoded,
+            "X-Artifact-Signature": str(metadata["signature"]),
+            "X-Content-SHA256": str(artifact["digest"]),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.post("/rounds/{round_id}/final-key/ack")
+def acknowledge_final_key(
+    round_id: str,
+    body: FinalKeyReceipt,
+    request: Request,
+    member: Annotated[dict[str, object], Depends(participant_identity)],
+    idem_key: Annotated[str, Depends(_idem)],
+) -> dict[str, object]:
+    database = _database(request)
+    _round_for_member(database, round_id, member)
+    payload = body.model_dump(mode="json")
+    digest = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+    try:
+        return database.acknowledge_final_key(
+            round_id, str(member["client_id"]), body.artifact_digest, idem_key, digest
+        )
+    except ValueError as exc:
+        _fail_tree(database, round_id, str(member["client_id"]), str(exc))
 
 
 def _validate_safetensors(path: str, schema: dict[str, Any]) -> None:
