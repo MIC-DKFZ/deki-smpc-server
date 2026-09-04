@@ -69,6 +69,9 @@ class AggregationWorker:
                 aggregate_tag = (aggregate_tag + tag) % FIELD_PRIME
             if aggregate is None:
                 raise ValueError("aggregation job has no inputs")
+            # Under protocol 1.1 this sum is intentionally still masked by the
+            # independently aggregated model key.  The worker never receives
+            # the group-encrypted final key needed to clear it.
             self.database.renew_job(job_id, claim_token, self.lease_seconds)
             data = save({name: aggregate[name].contiguous() for name in sorted(aggregate)})
             stored = self.store.put_bytes(data)

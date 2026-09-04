@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import cast
 
 from app.domain.states import RoundState, transition_allowed
+from app.domain.topology import derive_tree_plan, tree_plan_hash
 from app.storage.filesystem import StoredObject
 
 SCHEMA = """
@@ -56,8 +57,34 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS audit_events (
  event_id INTEGER PRIMARY KEY AUTOINCREMENT, round_id TEXT, actor TEXT NOT NULL,
  event_type TEXT NOT NULL, state_version INTEGER, created_at REAL NOT NULL, detail TEXT);
+CREATE TABLE IF NOT EXISTS tree_plans (
+ round_id TEXT PRIMARY KEY, plan_hash TEXT NOT NULL, plan_json TEXT NOT NULL, manifest_json TEXT NOT NULL,
+ created_at REAL NOT NULL, FOREIGN KEY(round_id) REFERENCES rounds(round_id));
+CREATE TABLE IF NOT EXISTS key_tasks (
+ round_id TEXT NOT NULL, task_id TEXT NOT NULL, action TEXT NOT NULL, stage TEXT NOT NULL, level INTEGER NOT NULL,
+ sender TEXT NOT NULL, receiver TEXT NOT NULL, dependencies_json TEXT NOT NULL, state TEXT NOT NULL,
+ artifact_id TEXT, ciphertext_digest TEXT, nonce TEXT, signature TEXT, completed_at REAL,
+ PRIMARY KEY(round_id,task_id), FOREIGN KEY(round_id) REFERENCES rounds(round_id),
+ FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id));
+CREATE TABLE IF NOT EXISTS task_dependencies (
+ round_id TEXT NOT NULL, task_id TEXT NOT NULL, dependency_id TEXT NOT NULL,
+ PRIMARY KEY(round_id,task_id,dependency_id),
+ FOREIGN KEY(round_id,task_id) REFERENCES key_tasks(round_id,task_id),
+ FOREIGN KEY(round_id,dependency_id) REFERENCES key_tasks(round_id,task_id));
+CREATE TABLE IF NOT EXISTS task_receipts (
+ round_id TEXT NOT NULL, task_id TEXT NOT NULL, actor TEXT NOT NULL, artifact_digest TEXT NOT NULL,
+ created_at REAL NOT NULL, PRIMARY KEY(round_id,task_id),
+ FOREIGN KEY(round_id,task_id) REFERENCES key_tasks(round_id,task_id));
+CREATE TABLE IF NOT EXISTS final_keys (
+ round_id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL, ciphertext_digest TEXT NOT NULL,
+ nonce TEXT NOT NULL, signature TEXT NOT NULL, sender TEXT NOT NULL, created_at REAL NOT NULL,
+ FOREIGN KEY(round_id) REFERENCES rounds(round_id), FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id));
+CREATE TABLE IF NOT EXISTS final_key_receipts (
+ round_id TEXT NOT NULL, client_id TEXT NOT NULL, artifact_digest TEXT NOT NULL, created_at REAL NOT NULL,
+ PRIMARY KEY(round_id,client_id), FOREIGN KEY(round_id) REFERENCES rounds(round_id));
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_artifacts_round ON artifacts(round_id);
+CREATE INDEX IF NOT EXISTS idx_key_tasks_ready ON key_tasks(round_id,state,sender);
 """
 
 
@@ -415,6 +442,7 @@ class Database:
             round_row = connection.execute("SELECT * FROM rounds WHERE round_id=?", (round_id,)).fetchone()
             if not round_row or round_row["state"] not in {
                 RoundState.KEY_SETUP.value,
+                RoundState.KEY_AGGREGATION.value,
                 RoundState.UPDATE_COLLECTION.value,
             }:
                 raise ValueError("ROUND_CONFLICT")
@@ -446,20 +474,447 @@ class Database:
                     )
                     mismatch = True
                 elif round_row["state"] == RoundState.KEY_SETUP.value:
-                    self._transition(
-                        connection,
-                        round_id,
-                        RoundState.KEY_SETUP,
-                        RoundState.UPDATE_COLLECTION,
-                        client_id,
-                        "KEY_SETUP_BARRIER",
-                    )
+                    if round_row["protocol_version"] == "1.1":
+                        self._create_tree_plan(connection, dict(round_row), now)
+                        self._transition(
+                            connection,
+                            round_id,
+                            RoundState.KEY_SETUP,
+                            RoundState.KEY_AGGREGATION,
+                            client_id,
+                            "KEY_SETUP_BARRIER",
+                        )
+                    else:
+                        self._transition(
+                            connection,
+                            round_id,
+                            RoundState.KEY_SETUP,
+                            RoundState.UPDATE_COLLECTION,
+                            client_id,
+                            "KEY_SETUP_BARRIER",
+                        )
         # Raised after the transaction commits: signalling the mismatch from
         # inside it rolled the FAILED transition and its audit event back, and
         # left the round to time out under a generic deadline code instead.
         if mismatch:
             raise ValueError("KEY_CONTEXT_MISMATCH")
         return response
+
+    @staticmethod
+    def _create_tree_plan(connection: sqlite3.Connection, round_row: dict[str, object], now: float) -> None:
+        records = connection.execute(
+            "SELECT client_id,public_key_json FROM participants WHERE round_id=? ORDER BY client_id",
+            (round_row["round_id"],),
+        ).fetchall()
+        if not records or any(record["public_key_json"] is None for record in records):
+            raise ValueError("NOT_READY")
+        manifest = []
+        for record in records:
+            public_key = json.loads(record["public_key_json"])
+            manifest.append(
+                {
+                    "client_id": record["client_id"],
+                    "public_key": public_key["public_key"],
+                    "signature": public_key["signature"],
+                }
+            )
+        plan = derive_tree_plan(round_row, manifest)
+        digest = tree_plan_hash(plan)
+        connection.execute(
+            "INSERT INTO tree_plans(round_id,plan_hash,plan_json,manifest_json,created_at) VALUES(?,?,?,?,?)",
+            (round_row["round_id"], digest, canonical_json(plan), canonical_json(manifest), now),
+        )
+        for task in plan["tasks"]:
+            dependencies = task["dependencies"]
+            connection.execute(
+                "INSERT INTO key_tasks(round_id,task_id,action,stage,level,sender,receiver,dependencies_json,state) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    round_row["round_id"],
+                    task["task_id"],
+                    task["action"],
+                    task["stage"],
+                    task["level"],
+                    task["sender"],
+                    task["receiver"],
+                    canonical_json(dependencies),
+                    "READY" if not dependencies else "WAITING",
+                ),
+            )
+        for task in plan["tasks"]:
+            connection.executemany(
+                "INSERT INTO task_dependencies(round_id,task_id,dependency_id) VALUES(?,?,?)",
+                [(round_row["round_id"], task["task_id"], dependency) for dependency in task["dependencies"]],
+            )
+        connection.execute(
+            "INSERT INTO audit_events(round_id,actor,event_type,created_at,detail) VALUES(?,?,?,?,?)",
+            (round_row["round_id"], "coordinator", "TREE_PLAN_COMMITTED", now, digest),
+        )
+
+    def tree_plan(self, round_id: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            row = connection.execute("SELECT * FROM tree_plans WHERE round_id=?", (round_id,)).fetchone()
+            if not row:
+                return None
+            return {
+                "plan_hash": row["plan_hash"],
+                "plan": json.loads(row["plan_json"]),
+                "ephemeral_manifest": json.loads(row["manifest_json"]),
+            }
+
+    @staticmethod
+    def _task_metadata(row: sqlite3.Row) -> dict[str, object]:
+        return {
+            "task_id": row["task_id"],
+            "action": row["action"],
+            "stage": row["stage"],
+            "level": row["level"],
+            "sender": row["sender"],
+            "receiver": row["receiver"],
+            "dependencies": json.loads(row["dependencies_json"]),
+        }
+
+    def next_key_action(self, round_id: str, client_id: str) -> dict[str, object] | None:
+        with self.connect() as connection:
+            round_row = connection.execute("SELECT * FROM rounds WHERE round_id=?", (round_id,)).fetchone()
+            if not round_row or round_row["protocol_version"] != "1.1":
+                raise ValueError("ROUND_CONFLICT")
+            if round_row["state"] == RoundState.UPDATE_COLLECTION.value:
+                return {"action": "KEY_AGGREGATION_COMPLETE"}
+            if round_row["state"] != RoundState.KEY_AGGREGATION.value:
+                raise ValueError("ROUND_CONFLICT")
+            task = connection.execute(
+                "SELECT * FROM key_tasks WHERE round_id=? AND sender=? AND state='READY' "
+                "ORDER BY CASE stage WHEN 'GROUP' THEN 0 ELSE 1 END,level,task_id LIMIT 1",
+                (round_id, client_id),
+            ).fetchone()
+            plan = connection.execute("SELECT * FROM tree_plans WHERE round_id=?", (round_id,)).fetchone()
+            if not plan:
+                raise ValueError("NOT_READY")
+            if task:
+                return {**self._task_metadata(task), "plan_hash": plan["plan_hash"]}
+            incomplete = connection.execute(
+                "SELECT count(*) FROM key_tasks WHERE round_id=? AND state!='COMPLETED'", (round_id,)
+            ).fetchone()[0]
+            final = connection.execute("SELECT * FROM final_keys WHERE round_id=?", (round_id,)).fetchone()
+            plan_json = json.loads(plan["plan_json"])
+            if not incomplete and not final and client_id == plan_json["root_client_id"]:
+                return {
+                    "action": "PUBLISH_FINAL",
+                    "task_id": "final-key",
+                    "stage": "FINAL_DISTRIBUTION",
+                    "level": -1,
+                    "sender": client_id,
+                    "receiver": "ALL_PARTICIPANTS",
+                    "dependencies": [plan_json["root_task_id"]],
+                    "plan_hash": plan["plan_hash"],
+                }
+            receipt = connection.execute(
+                "SELECT 1 FROM final_key_receipts WHERE round_id=? AND client_id=?", (round_id, client_id)
+            ).fetchone()
+            if final and not receipt:
+                return {
+                    "action": "ACK_FINAL",
+                    "task_id": "final-key",
+                    "stage": "FINAL_DISTRIBUTION",
+                    "level": -1,
+                    "sender": final["sender"],
+                    "receiver": client_id,
+                    "dependencies": [],
+                    "plan_hash": plan["plan_hash"],
+                }
+            return None
+
+    def record_task_artifact(
+        self,
+        round_id: str,
+        client_id: str,
+        task_id: str,
+        stored: StoredObject,
+        ciphertext_digest: str,
+        nonce: str,
+        signature: str,
+        idem_key: str,
+        request_digest: str,
+    ) -> tuple[dict[str, object], bool]:
+        now = time.time()
+        operation = f"key_task_artifact:{task_id}"
+        with self.transaction() as connection:
+            prior = connection.execute(
+                "SELECT content_digest,response_json FROM idempotency WHERE client_id=? AND round_id=? "
+                "AND operation=? AND idem_key=?",
+                (client_id, round_id, operation, idem_key),
+            ).fetchone()
+            if prior:
+                if prior["content_digest"] != request_digest:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                return cast(dict[str, object], json.loads(prior["response_json"])), True
+            round_row = connection.execute("SELECT state FROM rounds WHERE round_id=?", (round_id,)).fetchone()
+            task = connection.execute(
+                "SELECT * FROM key_tasks WHERE round_id=? AND task_id=?", (round_id, task_id)
+            ).fetchone()
+            if (
+                not round_row
+                or round_row["state"] != RoundState.KEY_AGGREGATION.value
+                or not task
+                or task["sender"] != client_id
+                or task["state"] != "READY"
+            ):
+                raise ValueError("ROUND_CONFLICT")
+            connection.execute(
+                "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    stored.object_id,
+                    round_id,
+                    client_id,
+                    f"key_task:{task_id}",
+                    stored.path,
+                    stored.digest,
+                    stored.size,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE key_tasks SET state='ARTIFACT_UPLOADED',artifact_id=?,ciphertext_digest=?,nonce=?,signature=? "
+                "WHERE round_id=? AND task_id=? AND state='READY'",
+                (stored.object_id, ciphertext_digest, nonce, signature, round_id, task_id),
+            )
+            response: dict[str, object] = {
+                "accepted": True,
+                "artifact_id": stored.object_id,
+                "digest": ciphertext_digest,
+                "size": stored.size,
+            }
+            connection.execute(
+                "INSERT INTO idempotency VALUES(?,?,?,?,?,?,?)",
+                (client_id, round_id, operation, idem_key, request_digest, canonical_json(response), now),
+            )
+            connection.execute(
+                "INSERT INTO audit_events(round_id,actor,event_type,created_at,detail) VALUES(?,?,?,?,?)",
+                (round_id, client_id, "TREE_ARTIFACT_ACCEPTED", now, task_id),
+            )
+            return response, False
+
+    def task_artifact(self, round_id: str, task_id: str, client_id: str) -> tuple[dict[str, object], dict[str, object]]:
+        with self.connect() as connection:
+            task = connection.execute(
+                "SELECT * FROM key_tasks WHERE round_id=? AND task_id=?", (round_id, task_id)
+            ).fetchone()
+            if not task or task["receiver"] != client_id or task["state"] != "COMPLETED":
+                raise ValueError("ROUND_CONFLICT")
+            artifact = connection.execute(
+                "SELECT * FROM artifacts WHERE artifact_id=?", (task["artifact_id"],)
+            ).fetchone()
+            if not artifact:
+                raise ValueError("NOT_READY")
+            metadata = {
+                **self._task_metadata(task),
+                "model_schema_hash": connection.execute(
+                    "SELECT model_schema_hash FROM rounds WHERE round_id=?", (round_id,)
+                ).fetchone()[0],
+                "nonce": task["nonce"],
+                "ciphertext_digest": task["ciphertext_digest"],
+                "ciphertext_size": artifact["size"],
+                "signature": task["signature"],
+            }
+            plan_hash = connection.execute("SELECT plan_hash FROM tree_plans WHERE round_id=?", (round_id,)).fetchone()[
+                0
+            ]
+            metadata["plan_hash"] = plan_hash
+            return dict(artifact), metadata
+
+    def acknowledge_task(
+        self, round_id: str, client_id: str, task_id: str, artifact_digest: str, idem_key: str, digest: str
+    ) -> dict[str, object]:
+        now = time.time()
+        operation = f"key_task_ack:{task_id}"
+        with self.transaction() as connection:
+            prior = connection.execute(
+                "SELECT content_digest,response_json FROM idempotency WHERE client_id=? AND round_id=? "
+                "AND operation=? AND idem_key=?",
+                (client_id, round_id, operation, idem_key),
+            ).fetchone()
+            if prior:
+                if prior["content_digest"] != digest:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                return cast(dict[str, object], json.loads(prior["response_json"]))
+            task = connection.execute(
+                "SELECT * FROM key_tasks WHERE round_id=? AND task_id=?", (round_id, task_id)
+            ).fetchone()
+            round_row = connection.execute("SELECT state FROM rounds WHERE round_id=?", (round_id,)).fetchone()
+            if (
+                not task
+                or not round_row
+                or round_row["state"] != RoundState.KEY_AGGREGATION.value
+                or task["sender"] != client_id
+                or task["state"] != "ARTIFACT_UPLOADED"
+                or task["ciphertext_digest"] != artifact_digest
+            ):
+                raise ValueError("ROUND_CONFLICT")
+            connection.execute(
+                "UPDATE key_tasks SET state='COMPLETED',completed_at=? WHERE round_id=? AND task_id=?",
+                (now, round_id, task_id),
+            )
+            connection.execute(
+                "INSERT INTO task_receipts(round_id,task_id,actor,artifact_digest,created_at) VALUES(?,?,?,?,?)",
+                (round_id, task_id, client_id, artifact_digest, now),
+            )
+            connection.execute(
+                "UPDATE key_tasks SET state='READY' WHERE round_id=? AND state='WAITING' AND NOT EXISTS ("
+                "SELECT 1 FROM task_dependencies d JOIN key_tasks source "
+                "ON source.round_id=d.round_id AND source.task_id=d.dependency_id "
+                "WHERE d.round_id=key_tasks.round_id AND d.task_id=key_tasks.task_id AND source.state!='COMPLETED')",
+                (round_id,),
+            )
+            response: dict[str, object] = {"accepted": True}
+            connection.execute(
+                "INSERT INTO idempotency VALUES(?,?,?,?,?,?,?)",
+                (client_id, round_id, operation, idem_key, digest, canonical_json(response), now),
+            )
+            connection.execute(
+                "INSERT INTO audit_events(round_id,actor,event_type,created_at,detail) VALUES(?,?,?,?,?)",
+                (round_id, client_id, "TREE_TASK_COMPLETED", now, task_id),
+            )
+            return response
+
+    def record_final_key(
+        self,
+        round_id: str,
+        client_id: str,
+        stored: StoredObject,
+        ciphertext_digest: str,
+        nonce: str,
+        signature: str,
+        idem_key: str,
+        request_digest: str,
+    ) -> tuple[dict[str, object], bool]:
+        now = time.time()
+        with self.transaction() as connection:
+            prior = connection.execute(
+                "SELECT content_digest,response_json FROM idempotency WHERE client_id=? AND round_id=? "
+                "AND operation='final_key' AND idem_key=?",
+                (client_id, round_id, idem_key),
+            ).fetchone()
+            if prior:
+                if prior["content_digest"] != request_digest:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                return cast(dict[str, object], json.loads(prior["response_json"])), True
+            plan_row = connection.execute("SELECT * FROM tree_plans WHERE round_id=?", (round_id,)).fetchone()
+            round_row = connection.execute("SELECT state FROM rounds WHERE round_id=?", (round_id,)).fetchone()
+            incomplete = connection.execute(
+                "SELECT count(*) FROM key_tasks WHERE round_id=? AND state!='COMPLETED'", (round_id,)
+            ).fetchone()[0]
+            if (
+                not plan_row
+                or not round_row
+                or round_row["state"] != RoundState.KEY_AGGREGATION.value
+                or json.loads(plan_row["plan_json"])["root_client_id"] != client_id
+                or incomplete
+            ):
+                raise ValueError("ROUND_CONFLICT")
+            connection.execute(
+                "INSERT INTO artifacts VALUES(?,?,?,?,?,?,?,?)",
+                (stored.object_id, round_id, client_id, "final_key", stored.path, stored.digest, stored.size, now),
+            )
+            connection.execute(
+                "INSERT INTO final_keys VALUES(?,?,?,?,?,?,?)",
+                (round_id, stored.object_id, ciphertext_digest, nonce, signature, client_id, now),
+            )
+            response: dict[str, object] = {
+                "accepted": True,
+                "artifact_id": stored.object_id,
+                "digest": ciphertext_digest,
+                "size": stored.size,
+            }
+            connection.execute(
+                "INSERT INTO idempotency VALUES(?,?,?,?,?,?,?)",
+                (client_id, round_id, "final_key", idem_key, request_digest, canonical_json(response), now),
+            )
+            connection.execute(
+                "INSERT INTO audit_events(round_id,actor,event_type,created_at) VALUES(?,?,?,?)",
+                (round_id, client_id, "FINAL_KEY_PUBLISHED", now),
+            )
+            return response, False
+
+    def final_key(self, round_id: str) -> tuple[dict[str, object], dict[str, object]] | None:
+        with self.connect() as connection:
+            final = connection.execute("SELECT * FROM final_keys WHERE round_id=?", (round_id,)).fetchone()
+            if not final:
+                return None
+            artifact = connection.execute(
+                "SELECT * FROM artifacts WHERE artifact_id=?", (final["artifact_id"],)
+            ).fetchone()
+            plan = connection.execute("SELECT * FROM tree_plans WHERE round_id=?", (round_id,)).fetchone()
+            if not artifact or not plan:
+                return None
+            metadata = {
+                "nonce": final["nonce"],
+                "ciphertext_digest": final["ciphertext_digest"],
+                "ciphertext_size": artifact["size"],
+                "signature": final["signature"],
+                "sender": final["sender"],
+                "plan_hash": plan["plan_hash"],
+            }
+            return dict(artifact), metadata
+
+    def acknowledge_final_key(
+        self, round_id: str, client_id: str, artifact_digest: str, idem_key: str, digest: str
+    ) -> dict[str, object]:
+        now = time.time()
+        with self.transaction() as connection:
+            prior = connection.execute(
+                "SELECT content_digest,response_json FROM idempotency WHERE client_id=? AND round_id=? "
+                "AND operation='final_key_ack' AND idem_key=?",
+                (client_id, round_id, idem_key),
+            ).fetchone()
+            if prior:
+                if prior["content_digest"] != digest:
+                    raise ValueError("IDEMPOTENCY_CONFLICT")
+                return cast(dict[str, object], json.loads(prior["response_json"]))
+            round_row = connection.execute("SELECT * FROM rounds WHERE round_id=?", (round_id,)).fetchone()
+            final = connection.execute("SELECT * FROM final_keys WHERE round_id=?", (round_id,)).fetchone()
+            if (
+                not round_row
+                or round_row["state"] != RoundState.KEY_AGGREGATION.value
+                or not final
+                or final["ciphertext_digest"] != artifact_digest
+            ):
+                raise ValueError("ROUND_CONFLICT")
+            connection.execute(
+                "INSERT INTO final_key_receipts VALUES(?,?,?,?)", (round_id, client_id, artifact_digest, now)
+            )
+            response: dict[str, object] = {"accepted": True}
+            connection.execute(
+                "INSERT INTO idempotency VALUES(?,?,?,?,?,?,?)",
+                (client_id, round_id, "final_key_ack", idem_key, digest, canonical_json(response), now),
+            )
+            connection.execute(
+                "INSERT INTO audit_events(round_id,actor,event_type,created_at) VALUES(?,?,?,?)",
+                (round_id, client_id, "FINAL_KEY_ACKNOWLEDGED", now),
+            )
+            count = connection.execute(
+                "SELECT count(*) FROM final_key_receipts WHERE round_id=?", (round_id,)
+            ).fetchone()[0]
+            if count == round_row["expected_count"]:
+                self._transition(
+                    connection,
+                    round_id,
+                    RoundState.KEY_AGGREGATION,
+                    RoundState.UPDATE_COLLECTION,
+                    client_id,
+                    "FINAL_KEY_BARRIER",
+                )
+            return response
+
+    def fail_round(self, round_id: str, actor: str, code: str, detail: str) -> None:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT state FROM rounds WHERE round_id=?", (round_id,)).fetchone()
+            if not row:
+                return
+            state = RoundState(row["state"])
+            if state in {RoundState.COMPLETED, RoundState.FAILED, RoundState.ABORTED, RoundState.EXPIRED}:
+                return
+            self._transition(connection, round_id, state, RoundState.FAILED, actor, code, detail[:256])
 
     def record_update(
         self, round_id: str, client_id: str, stored: StoredObject, tag: str, idem_key: str, request_digest: str
@@ -687,6 +1142,12 @@ class Database:
                 raise ValueError("ROUND_CONFLICT")
             for table in (
                 "jobs",
+                "final_key_receipts",
+                "final_keys",
+                "task_receipts",
+                "task_dependencies",
+                "key_tasks",
+                "tree_plans",
                 "artifacts",
                 "participants",
                 "audit_events",

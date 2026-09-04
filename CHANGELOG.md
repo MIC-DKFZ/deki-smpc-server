@@ -2,7 +2,32 @@
 
 This file records released changes to `deki-smpc-server`.
 
-## [Unreleased]
+## [1.0.1] - 2026-09-04
+
+### Protocol and API
+
+- Added protocol `1.1` and made it the round-creation default while preserving
+  explicit `1.0` rounds and their state path unchanged.
+- Added `KEY_AGGREGATION`, canonical tree-plan retrieval, authorized next-action
+  polling, immutable encrypted task artifacts and receipts, and final-key
+  distribution and acknowledgement resources.
+- Kept worker int64 and prime-field addition unchanged; its protocol-`1.1`
+  result is explicitly still masked and cannot be cleared by the service.
+
+### Durability and security
+
+- Added repeatable SQLite tables for tree plans, tasks, dependencies, receipts,
+  encrypted artifact references, and final-key receipts. Task completion and
+  dependent activation commit atomically and survive API restarts.
+- Enforced sender/receiver authorization, task readiness, immutable slots,
+  stable idempotency, size and digest limits, signed AEAD contexts, deadlines,
+  retention, and durable round failure for rejected key artifacts.
+
+### Validation and documentation
+
+- Added shared `1.1` fixture validation, restart/task-order tests, wrong-actor
+  rejection, and complete 3/5/7/12-participant client/server rounds proving the
+  server result differs from the clear aggregate.
 
 ### Fixed
 

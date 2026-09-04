@@ -13,8 +13,8 @@ every participant can verify.
 <a href="https://fastapi.tiangolo.com/">
   <img alt="FastAPI 0.115+" src="https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&amp;logoColor=white">
 </a>
-<a href="docs/protocol-v1.md">
-  <img alt="Protocol v1" src="https://img.shields.io/badge/protocol-v1-6C63FF">
+<a href="docs/protocol-v1.1.md">
+  <img alt="Protocol 1.1" src="https://img.shields.io/badge/protocol-1.1-6C63FF">
 </a>
 <a href="LICENSE">
   <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-green.svg">
@@ -29,8 +29,8 @@ computation system. It coordinates a fixed group of federated learning
 participants while the companion `deki-smpc` client protects each site's model
 update and verifies the combined result.
 
-The server handles the operational work—authentication, round progress,
-durable storage, aggregation jobs, deadlines, and cleanup—without requiring
+The server handles the operational work, including authentication, round
+progress, durable storage, aggregation jobs, deadlines, and cleanup, without requiring
 access to any participant's individual update in the clear.
 
 > The service is a coordinator and calculator, not a trusted holder of private
@@ -43,35 +43,29 @@ training step, the operator opens a round for a specific participant set and
 model schema. deki-smpc then moves every participant through the same short flow:
 
 ```mermaid
-sequenceDiagram
-    participant O as Operator
-    participant C as Enrolled clients
-    participant A as deki-smpc API
-    participant W as Aggregation worker
-    O->>A: Create a round
-    C->>A: Join and exchange signed setup material
-    C->>A: Upload masked model updates
-    A->>W: Queue aggregation
-    W->>A: Publish aggregate
-    A-->>C: Return result for client-side verification
+flowchart LR
+    A["1. Train locally<br/>at each site"] --> B["2. Mask each<br/>model update"]
+    B --> C["3. Server adds<br/>masked updates"]
+    C --> D["4. Sites unmask<br/>and verify the result"]
 ```
 
 The API keeps participants synchronized and persists every state transition.
-The worker adds the masked tensor artifacts; their pairwise masks cancel only
-in the complete sum. Clients independently check the published result before
-using it.
+Under default protocol `1.1`, clients aggregate model keys through parallel
+groups and a binary tree. The worker adds masked tensor artifacts, but their
+aggregate remains masked from the service; clients decrypt the final key,
+unmask, and verify locally.
 
 ### What the server provides
 
-- **Round coordination** — one authenticated state machine keeps the operator
+- **Round coordination:** one authenticated state machine keeps the operator
   and all committed participants in sync.
-- **Durable execution** — round metadata, immutable model artifacts, jobs, and
+- **Durable execution:** round metadata, immutable model artifacts, jobs, and
   audit events survive process restarts.
-- **Safe retries** — idempotency keys make repeated requests predictable while
+- **Safe retries:** idempotency keys make repeated requests predictable while
   leases let workers recover interrupted jobs.
-- **Operational controls** — health endpoints, deadlines, retention cleanup,
+- **Operational controls:** health endpoints, deadlines, retention cleanup,
   bounded artifact sizes, and graceful shutdown behavior.
-- **A small deployment footprint** — one FastAPI service, one aggregation
+- **A small deployment footprint:** one FastAPI service, one aggregation
   worker, and one shared durable volume for the supplied single-host setup.
 
 ## Quick start
@@ -157,8 +151,8 @@ deki-smpc deliberately separates the participant-facing library from the service
 | **`deki-smpc`** | Participating sites | Protect updates and verify results |
 | **`deki-smpc-server`** (this repository) | Service operators | Coordinate rounds and publish aggregates |
 
-Release `1.0.0` of both repositories implements protocol v1 and wire value
-`1.0`. Keep the repositories as siblings when running the full integration
+Release `1.0.1` of both repositories defaults new rounds to wire protocol
+`1.1`. Keep the repositories as siblings when running the full integration
 suite.
 
 ## End-to-end demo
@@ -191,22 +185,31 @@ docker compose -f docker-compose.yml -f docker-compose.tamper.yml \
 
 </details>
 
+The encrypted-tree tamper scenario is:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.tree-tamper.yml \
+  --profile e2e -p deki_v11_tree_tamper up --build -d
+test "$(docker wait deki_v11_tree_tamper-verify-1)" = "0"
+docker compose -f docker-compose.yml -f docker-compose.tree-tamper.yml \
+  --profile e2e -p deki_v11_tree_tamper down --volumes --remove-orphans
+```
+
 For a more approachable training example, start with the client repository's
 `docs/getting-started-mnist.md` walkthrough. It covers federation setup, three
 local training sites, round creation, and aggregation from beginning to end.
 
 ## Documentation
 
-- **[Deployment](docs/deployment.md)** — topology, configuration, TLS, storage,
+- **[Deployment](docs/deployment.md):** topology, configuration, TLS, storage,
   and resource planning
-- **[Operations](docs/operations.md)** — health, recovery, retention, and audit
+- **[Operations](docs/operations.md):** health, recovery, retention, and audit
   workflows
-- **[API v1](docs/api-v1.md)** — operator and participant endpoints
-- **[Protocol responsibilities](docs/protocol-v1.md)** — the server's role in
-  each protocol phase
-- **[Architecture decision record](docs/adr/0001-durable-rounds.md)** — durable
+- **[API v1](docs/api-v1.md):** operator and participant endpoints
+- **[Protocol 1.1 responsibilities](docs/protocol-v1.1.md):** durable group and tree coordination
+- **[Architecture decision record](docs/adr/0001-durable-rounds.md):** durable
   round orchestration and storage boundaries
-- **[Changelog](CHANGELOG.md)** — releases and notable changes
+- **[Changelog](CHANGELOG.md):** releases and notable changes
 
 The full cryptographic protocol, wire format, and security model live in the
 companion `deki-smpc` repository.
@@ -214,9 +217,9 @@ companion `deki-smpc` repository.
 ## Security boundary
 
 The aggregation service is treated as untrusted for individual model
-confidentiality and aggregate integrity. It sees request metadata, masked
-participant artifacts, and the final authorized aggregate; it does not receive
-the individual clear updates. Clients reject malformed or modified results.
+confidentiality and aggregate integrity. It sees request metadata and masked
+participant artifacts. Protocol `1.1` also hides the final clear aggregate.
+Clients reject malformed or modified results.
 
 deki-smpc v1 requires every committed participant to finish a round. Dropout causes
 expiry or operator abort, and protection against malicious participant inputs

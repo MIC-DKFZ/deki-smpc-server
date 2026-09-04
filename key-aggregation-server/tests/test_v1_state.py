@@ -15,11 +15,14 @@ from app.persistence.database import Database
         (RoundState.CREATED, RoundState.REGISTRATION_OPEN),
         (RoundState.REGISTRATION_OPEN, RoundState.KEY_SETUP),
         (RoundState.KEY_SETUP, RoundState.UPDATE_COLLECTION),
+        (RoundState.KEY_SETUP, RoundState.KEY_AGGREGATION),
+        (RoundState.KEY_AGGREGATION, RoundState.UPDATE_COLLECTION),
         (RoundState.UPDATE_COLLECTION, RoundState.AGGREGATING),
         (RoundState.AGGREGATING, RoundState.RESULT_READY),
         (RoundState.RESULT_READY, RoundState.COMPLETED),
         (RoundState.KEY_SETUP, RoundState.FAILED),
         (RoundState.UPDATE_COLLECTION, RoundState.EXPIRED),
+        (RoundState.KEY_AGGREGATION, RoundState.FAILED),
     ],
 )
 def test_legal_state_transitions(source: RoundState, target: RoundState) -> None:
