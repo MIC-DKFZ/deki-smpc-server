@@ -44,10 +44,9 @@ model schema. deki-smpc then moves every participant through the same short flow
 
 ```mermaid
 flowchart LR
-    P[Participants] -->|masked updates| S[Server aggregation]
-    P --> K[Binary key tree]
-    S --> V[Local unmask and verification]
-    K --> V
+    A["1. Train locally<br/>at each site"] --> B["2. Mask each<br/>model update"]
+    B --> C["3. Server adds<br/>masked updates"]
+    C --> D["4. Sites unmask<br/>and verify the result"]
 ```
 
 The API keeps participants synchronized and persists every state transition.
