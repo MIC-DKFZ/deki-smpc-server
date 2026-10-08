@@ -2,6 +2,13 @@
 
 This file records released changes to `deki-smpc-server`.
 
+## Unreleased
+
+### Documentation
+
+- Added a README citation section for the published IEEE JBHI article
+  (doi:10.1109/JBHI.2026.3740976).
+
 ## [1.0.1] - 2026-09-04
 
 ### Protocol and API
