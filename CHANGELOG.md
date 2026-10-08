@@ -2,6 +2,13 @@
 
 This file records released changes to `deki-smpc-server`.
 
+## [1.0.3] - 2026-10-08
+
+### Documentation
+
+- Replaced the README overview diagram with an animated walkthrough of the
+  secure aggregation flow.
+
 ## [1.0.2] - 2026-10-08
 
 ### Documentation
